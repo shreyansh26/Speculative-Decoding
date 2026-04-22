@@ -1,0 +1,24 @@
+[project]
+name = "speculative-decoding"
+version = "0.1.0"
+description = "Speculative decoding implementations from scratch."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "huggingface-hub>=0.35.3,<0.36",
+  "pytest>=8.4.2,<9",
+  "safetensors>=0.6.2,<0.7",
+  "torch>=2.8.0,<2.9",
+  "transformers>=4.57.1,<4.58",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.setuptools]
+packages = ["common"]
+
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
