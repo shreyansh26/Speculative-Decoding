@@ -15,7 +15,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from common.qwen3 import Qwen3Config, Qwen3ForCausalLM
-from common.tokenizer import load_prompts, load_tokenizer
+from common.tokenizer import load_prompts, load_tokenizer, render_prompt
 
 
 @dataclass(slots=True)
@@ -40,6 +40,12 @@ class MiniQwenConfig:
             rope_theta=self.rope_theta,
             rms_norm_eps=self.rms_norm_eps,
         )
+
+
+@dataclass(slots=True)
+class TrainingExample:
+    token_ids: torch.Tensor
+    loss_mask: torch.Tensor
 
 
 def build_draft_model(
@@ -92,6 +98,61 @@ def build_training_sequences(
     return sequences
 
 
+def dataset_uses_completion(data_path: str | Path) -> bool:
+    with Path(data_path).open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            sample = json.loads(line)
+            return "completion" in sample
+    return False
+
+
+def build_distillation_examples(
+    data_path: str | Path,
+    tokenizer,
+    seq_len: int,
+) -> list[TrainingExample]:
+    examples: list[TrainingExample] = []
+    chunk_len = seq_len + 1
+    with Path(data_path).open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            sample = json.loads(line)
+            if "completion" not in sample:
+                raise ValueError(f"{data_path}:{line_number} is missing required 'completion' field")
+            if "prompt_ids" in sample:
+                prompt_ids = [int(token_id) for token_id in sample["prompt_ids"]]
+            else:
+                rendered = render_prompt(tokenizer, sample)
+                prompt_ids = tokenizer.encode(rendered.prompt, add_special_tokens=False)
+            if "completion_ids" in sample:
+                completion_ids = [int(token_id) for token_id in sample["completion_ids"]]
+            else:
+                completion_ids = tokenizer.encode(str(sample["completion"]), add_special_tokens=False)
+            if not completion_ids:
+                continue
+            token_ids = prompt_ids + completion_ids
+            loss_mask = ([0] * len(prompt_ids)) + ([1] * len(completion_ids))
+            if len(token_ids) > chunk_len:
+                token_ids = token_ids[-chunk_len:]
+                loss_mask = loss_mask[-chunk_len:]
+            if len(token_ids) < 2:
+                continue
+            if sum(loss_mask[1:]) <= 0:
+                continue
+            examples.append(
+                TrainingExample(
+                    token_ids=torch.tensor(token_ids, dtype=torch.long),
+                    loss_mask=torch.tensor(loss_mask, dtype=torch.float32),
+                )
+            )
+    if not examples:
+        raise ValueError("dataset did not produce any distillation examples")
+    return examples
+
+
 def make_batch(sequences: Sequence[torch.Tensor], batch_size: int, step: int) -> torch.Tensor:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -103,6 +164,23 @@ def make_batch(sequences: Sequence[torch.Tensor], batch_size: int, step: int) ->
     return batch
 
 
+def make_distillation_batch(
+    examples: Sequence[TrainingExample],
+    batch_size: int,
+    step: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    selected = [examples[(step + offset) % len(examples)] for offset in range(batch_size)]
+    max_len = max(example.token_ids.numel() for example in selected)
+    batch = torch.zeros((batch_size, max_len), dtype=torch.long)
+    loss_mask = torch.zeros((batch_size, max_len), dtype=torch.float32)
+    for row, example in enumerate(selected):
+        batch[row, : example.token_ids.numel()] = example.token_ids
+        loss_mask[row, : example.loss_mask.numel()] = example.loss_mask
+    return batch, loss_mask
+
+
 def language_modeling_loss(model: Qwen3ForCausalLM, batch: torch.Tensor) -> torch.Tensor:
     inputs = batch[:, :-1]
     labels = batch[:, 1:]
@@ -111,6 +189,27 @@ def language_modeling_loss(model: Qwen3ForCausalLM, batch: torch.Tensor) -> torc
         logits.reshape(-1, logits.shape[-1]),
         labels.reshape(-1),
     )
+
+
+def masked_language_modeling_loss(
+    model: Qwen3ForCausalLM,
+    batch: torch.Tensor,
+    loss_mask: torch.Tensor,
+) -> torch.Tensor:
+    inputs = batch[:, :-1]
+    labels = batch[:, 1:]
+    label_mask = loss_mask[:, 1:]
+    logits = model(inputs).logits
+    token_losses = torch.nn.functional.cross_entropy(
+        logits.reshape(-1, logits.shape[-1]),
+        labels.reshape(-1),
+        reduction="none",
+    )
+    flat_mask = label_mask.reshape(-1)
+    total_weight = flat_mask.sum()
+    if float(total_weight.item()) <= 0.0:
+        raise ValueError("masked batch does not contain any supervised completion tokens")
+    return (token_losses * flat_mask).sum() / total_weight
 
 
 def train_steps(
@@ -148,10 +247,47 @@ def train_steps(
     return losses
 
 
+def train_distillation_steps(
+    model: Qwen3ForCausalLM,
+    examples: Sequence[TrainingExample],
+    *,
+    steps: int,
+    batch_size: int,
+    grad_accum: int,
+    lr: float,
+    device: str | torch.device,
+    dtype: torch.dtype,
+) -> list[float]:
+    if steps <= 0:
+        raise ValueError("steps must be positive")
+    if grad_accum <= 0:
+        raise ValueError("grad_accum must be positive")
+
+    model = model.to(device=device)
+    if device != "cpu":
+        model = model.to(dtype=dtype)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    losses: list[float] = []
+
+    optimizer.zero_grad(set_to_none=True)
+    for step in range(steps):
+        batch, loss_mask = make_distillation_batch(examples, batch_size=batch_size, step=step)
+        batch = batch.to(device=device)
+        loss_mask = loss_mask.to(device=device)
+        loss = masked_language_modeling_loss(model, batch, loss_mask)
+        (loss / grad_accum).backward()
+        losses.append(float(loss.item()))
+        if (step + 1) % grad_accum == 0 or step == steps - 1:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+    return losses
+
+
 def save_draft_checkpoint(
     model: Qwen3ForCausalLM,
     output_dir: str | Path,
-    mini_config: MiniQwenConfig,
+    mini_config: MiniQwenConfig | None,
     tokenizer_name_or_path: str,
     target_model_path: str,
     seq_len: int,
@@ -163,7 +299,8 @@ def save_draft_checkpoint(
         str(checkpoint_dir / "model.safetensors"),
     )
     metadata = {
-        "mini_qwen_config": asdict(mini_config),
+        "mini_qwen_config": asdict(mini_config) if mini_config is not None else None,
+        "qwen3_config": asdict(model.config),
         "vocab_size": model.config.vocab_size,
         "max_position_embeddings": model.config.max_position_embeddings,
         "tokenizer_name_or_path": tokenizer_name_or_path,
@@ -181,12 +318,15 @@ def load_draft_checkpoint(
 ) -> Qwen3ForCausalLM:
     checkpoint_path = Path(checkpoint_dir)
     metadata = json.loads((checkpoint_path / "config.json").read_text(encoding="utf-8"))
-    mini_config = MiniQwenConfig(**metadata["mini_qwen_config"])
-    model = build_draft_model(
-        vocab_size=int(metadata["vocab_size"]),
-        max_position_embeddings=int(metadata["max_position_embeddings"]),
-        config=mini_config,
-    )
+    if metadata.get("qwen3_config") is not None:
+        model = Qwen3ForCausalLM(Qwen3Config(**metadata["qwen3_config"]))
+    else:
+        mini_config = MiniQwenConfig(**metadata["mini_qwen_config"])
+        model = build_draft_model(
+            vocab_size=int(metadata["vocab_size"]),
+            max_position_embeddings=int(metadata["max_position_embeddings"]),
+            config=mini_config,
+        )
     state_dict = load_file(str(checkpoint_path / "model.safetensors"))
     model.load_state_dict(state_dict, strict=True)
     if dtype is not None and str(device) != "cpu":
@@ -207,6 +347,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--init-model-path", default="")
     parser.add_argument("--compile", action="store_true")
     return parser.parse_args()
 
@@ -215,27 +356,45 @@ def main() -> None:
     args = parse_args()
     dtype = parse_dtype(args.dtype)
     tokenizer = load_tokenizer(args.target_model_path)
-    sequences = build_training_sequences(args.data, tokenizer=tokenizer, seq_len=args.seq_len)
-    mini_config = MiniQwenConfig()
-    model = build_draft_model(
-        vocab_size=len(tokenizer),
-        max_position_embeddings=max(args.seq_len, 128),
-        config=mini_config,
-    )
+    using_distillation = dataset_uses_completion(args.data)
+    mini_config: MiniQwenConfig | None = None
+    if args.init_model_path:
+        model = Qwen3ForCausalLM.from_pretrained(args.init_model_path, device="cpu", dtype=dtype)
+    else:
+        mini_config = MiniQwenConfig()
+        model = build_draft_model(
+            vocab_size=len(tokenizer),
+            max_position_embeddings=max(args.seq_len, 128),
+            config=mini_config,
+        )
 
     if args.compile:
         model = torch.compile(model, mode="reduce-overhead")
 
-    losses = train_steps(
-        model=model,
-        sequences=sequences,
-        steps=args.steps,
-        batch_size=args.batch_size,
-        grad_accum=args.grad_accum,
-        lr=args.lr,
-        device=args.device,
-        dtype=dtype,
-    )
+    if using_distillation:
+        examples = build_distillation_examples(args.data, tokenizer=tokenizer, seq_len=args.seq_len)
+        losses = train_distillation_steps(
+            model=model,
+            examples=examples,
+            steps=args.steps,
+            batch_size=args.batch_size,
+            grad_accum=args.grad_accum,
+            lr=args.lr,
+            device=args.device,
+            dtype=dtype,
+        )
+    else:
+        sequences = build_training_sequences(args.data, tokenizer=tokenizer, seq_len=args.seq_len)
+        losses = train_steps(
+            model=model,
+            sequences=sequences,
+            steps=args.steps,
+            batch_size=args.batch_size,
+            grad_accum=args.grad_accum,
+            lr=args.lr,
+            device=args.device,
+            dtype=dtype,
+        )
     save_draft_checkpoint(
         model=model,
         output_dir=args.output,
@@ -253,6 +412,8 @@ def main() -> None:
                 "lr": args.lr,
                 "initial_loss": losses[0],
                 "final_loss": losses[-1],
+                "using_distillation": using_distillation,
+                "init_model_path": args.init_model_path,
             },
             indent=2,
         )
