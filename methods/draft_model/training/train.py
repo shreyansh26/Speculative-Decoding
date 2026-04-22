@@ -7,6 +7,7 @@ tokenizer, then saves only the draft model weights and config for speculation.
 
 import argparse
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
@@ -156,7 +157,8 @@ def build_distillation_examples(
 def make_batch(sequences: Sequence[torch.Tensor], batch_size: int, step: int) -> torch.Tensor:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    selected = [sequences[(step + offset) % len(sequences)] for offset in range(batch_size)]
+    start = (step * batch_size) % len(sequences)
+    selected = [sequences[(start + offset) % len(sequences)] for offset in range(batch_size)]
     max_len = max(sequence.numel() for sequence in selected)
     batch = torch.zeros((batch_size, max_len), dtype=torch.long)
     for row, sequence in enumerate(selected):
@@ -171,7 +173,8 @@ def make_distillation_batch(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    selected = [examples[(step + offset) % len(examples)] for offset in range(batch_size)]
+    start = (step * batch_size) % len(examples)
+    selected = [examples[(start + offset) % len(examples)] for offset in range(batch_size)]
     max_len = max(example.token_ids.numel() for example in selected)
     batch = torch.zeros((batch_size, max_len), dtype=torch.long)
     loss_mask = torch.zeros((batch_size, max_len), dtype=torch.float32)
@@ -335,6 +338,22 @@ def load_draft_checkpoint(
     return model
 
 
+def resolve_total_steps(
+    dataset_size: int,
+    *,
+    batch_size: int,
+    steps: int,
+    epochs: int,
+) -> int:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if epochs > 0:
+        return math.ceil(dataset_size / batch_size) * epochs
+    if steps <= 0:
+        raise ValueError("steps must be positive when epochs is not set")
+    return steps
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a compact draft model.")
     parser.add_argument("--target-model-path", required=True)
@@ -342,6 +361,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--seq-len", type=int, default=1024)
     parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--epochs", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--grad-accum", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -373,10 +393,16 @@ def main() -> None:
 
     if using_distillation:
         examples = build_distillation_examples(args.data, tokenizer=tokenizer, seq_len=args.seq_len)
+        total_steps = resolve_total_steps(
+            len(examples),
+            batch_size=args.batch_size,
+            steps=args.steps,
+            epochs=args.epochs,
+        )
         losses = train_distillation_steps(
             model=model,
             examples=examples,
-            steps=args.steps,
+            steps=total_steps,
             batch_size=args.batch_size,
             grad_accum=args.grad_accum,
             lr=args.lr,
@@ -385,10 +411,16 @@ def main() -> None:
         )
     else:
         sequences = build_training_sequences(args.data, tokenizer=tokenizer, seq_len=args.seq_len)
+        total_steps = resolve_total_steps(
+            len(sequences),
+            batch_size=args.batch_size,
+            steps=args.steps,
+            epochs=args.epochs,
+        )
         losses = train_steps(
             model=model,
             sequences=sequences,
-            steps=args.steps,
+            steps=total_steps,
             batch_size=args.batch_size,
             grad_accum=args.grad_accum,
             lr=args.lr,
@@ -406,7 +438,8 @@ def main() -> None:
     (Path(args.output) / "training_summary.json").write_text(
         json.dumps(
             {
-                "steps": args.steps,
+                "steps": total_steps,
+                "epochs": args.epochs,
                 "batch_size": args.batch_size,
                 "grad_accum": args.grad_accum,
                 "lr": args.lr,

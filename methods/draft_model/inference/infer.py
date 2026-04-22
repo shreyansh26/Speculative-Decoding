@@ -13,7 +13,7 @@ from typing import Sequence
 
 import torch
 
-from common.metrics import SpecDecodeStats, write_jsonl_record
+from common.metrics import SpecDecodeStats, summarize_jsonl, write_jsonl_record
 from common.qwen3 import Qwen3ForCausalLM
 from common.sampling import autoregressive_generate, sample_from_logits
 from common.tokenizer import load_prompts, load_tokenizer
@@ -231,6 +231,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--cuda-graphs", action="store_true")
+    parser.add_argument("--warmup-prompts", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--skip-baseline", action="store_true")
     return parser.parse_args()
@@ -265,6 +266,30 @@ def main() -> None:
         if torch.cuda.is_available() and torch.device(args.device).type == "cuda":
             torch.cuda.synchronize(torch.device(args.device))
 
+    warmup_count = min(max(args.warmup_prompts, 0), len(prompts))
+    for prompt in prompts[:warmup_count]:
+        prompt_ids = tokenizer.encode(prompt.prompt, add_special_tokens=False)
+        if not args.skip_baseline:
+            autoregressive_generate(
+                model=target_model,
+                prompt_ids=prompt_ids,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+        run_draft_model_speculative_decode(
+            target_model=target_model,
+            draft_model=draft_model,
+            prompt_ids=prompt_ids,
+            max_new_tokens=args.max_new_tokens,
+            draft_len=args.draft_len,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+        synchronize()
+
     for prompt in prompts:
         prompt_ids = tokenizer.encode(prompt.prompt, add_special_tokens=False)
         baseline_tokens: list[int] = []
@@ -297,6 +322,11 @@ def main() -> None:
         )
         synchronize()
         method_time_s = time.perf_counter() - wall_start
+        if not args.skip_baseline and generated_tokens != baseline_tokens:
+            raise RuntimeError(
+                f"greedy speculative output diverged for {prompt.prompt_id}:"
+                f" baseline={baseline_tokens} speculative={generated_tokens}"
+            )
 
         stats = SpecDecodeStats(
             method="draft_model",
@@ -327,11 +357,8 @@ def main() -> None:
 
     (output_path.with_suffix(".summary.json")).write_text(
         json.dumps(
-            {
-                "method": "draft_model",
-                "num_prompts": len(prompts),
-                "output": str(output_path),
-            },
+            summarize_jsonl(output_path)
+            | {"method": "draft_model", "num_prompts": len(prompts), "output": str(output_path)},
             indent=2,
         )
         + "\n",
