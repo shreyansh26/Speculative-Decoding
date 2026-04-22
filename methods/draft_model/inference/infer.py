@@ -28,6 +28,14 @@ from common.verification import (
 from methods.draft_model.training.train import load_draft_checkpoint, parse_dtype
 
 
+DEFAULT_MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
+DEFAULT_CHECKPOINT_PATH = "checkpoints/draft_model_qwen25_05b_2ep"
+DEFAULT_PROMPTS_PATH = "data/ultrachat_eval_50_short_trunc512.jsonl"
+DEFAULT_MAX_NEW_TOKENS = 16
+DEFAULT_DRAFT_LEN = 4
+DEFAULT_WARMUP_PROMPTS = 2
+
+
 def propose_draft_tokens(
     draft_model: torch.nn.Module,
     draft_state: PrefixState,
@@ -219,12 +227,12 @@ def verify_draft_model_chunk(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Draft-model speculative decoding inference.")
-    parser.add_argument("--model-path", required=True)
-    parser.add_argument("--checkpoint-path", required=True)
-    parser.add_argument("--prompts", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--max-new-tokens", type=int, default=128)
-    parser.add_argument("--draft-len", type=int, default=5)
+    parser.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--checkpoint-path", default=DEFAULT_CHECKPOINT_PATH)
+    parser.add_argument("--prompts", default=DEFAULT_PROMPTS_PATH)
+    parser.add_argument("--output", default="")
+    parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS)
+    parser.add_argument("--draft-len", type=int, default=DEFAULT_DRAFT_LEN)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--dtype", default="bf16")
@@ -233,7 +241,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile-target", action="store_true")
     parser.add_argument("--compile-draft", action="store_true")
     parser.add_argument("--cuda-graphs", action="store_true")
-    parser.add_argument("--warmup-prompts", type=int, default=0)
+    parser.add_argument("--warmup-prompts", type=int, default=DEFAULT_WARMUP_PROMPTS)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--skip-baseline", action="store_true")
     return parser.parse_args()
@@ -262,7 +270,11 @@ def main() -> None:
     if compile_draft:
         draft_model = torch.compile(draft_model, mode="reduce-overhead")
 
-    output_path = Path(args.output)
+    output_path = (
+        Path(args.output)
+        if args.output
+        else Path(f"runs/draft_model_qwen25_05b_2ep_len{args.draft_len}.jsonl")
+    )
     if output_path.exists():
         output_path.unlink()
 

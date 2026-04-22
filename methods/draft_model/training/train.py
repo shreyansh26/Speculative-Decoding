@@ -19,6 +19,17 @@ from common.qwen3 import Qwen3Config, Qwen3ForCausalLM
 from common.tokenizer import load_prompts, load_tokenizer, render_prompt
 
 
+DEFAULT_TARGET_MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
+DEFAULT_INIT_MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
+DEFAULT_DISTILLATION_DATA = "data/ultrachat_300_trunc512_qwen7b_greedy16_ids.jsonl"
+DEFAULT_OUTPUT_DIR = "checkpoints/draft_model_qwen25_05b_2ep"
+DEFAULT_SEQ_LEN = 528
+DEFAULT_EPOCHS = 2
+DEFAULT_BATCH_SIZE = 2
+DEFAULT_GRAD_ACCUM = 1
+DEFAULT_LR = 5e-5
+
+
 @dataclass(slots=True)
 class MiniQwenConfig:
     hidden_size: int = 768
@@ -357,18 +368,18 @@ def resolve_total_steps(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a compact draft model.")
-    parser.add_argument("--target-model-path", required=True)
-    parser.add_argument("--data", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--seq-len", type=int, default=1024)
+    parser.add_argument("--target-model-path", default=DEFAULT_TARGET_MODEL_PATH)
+    parser.add_argument("--data", default=DEFAULT_DISTILLATION_DATA)
+    parser.add_argument("--output", default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--seq-len", type=int, default=DEFAULT_SEQ_LEN)
     parser.add_argument("--steps", type=int, default=1000)
-    parser.add_argument("--epochs", type=int, default=0)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--grad-accum", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--grad-accum", type=int, default=DEFAULT_GRAD_ACCUM)
+    parser.add_argument("--lr", type=float, default=DEFAULT_LR)
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--init-model-path", default="")
+    parser.add_argument("--init-model-path", default=DEFAULT_INIT_MODEL_PATH)
     parser.add_argument("--compile", action="store_true")
     return parser.parse_args()
 
