@@ -230,6 +230,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--compile-target", action="store_true")
+    parser.add_argument("--compile-draft", action="store_true")
     parser.add_argument("--cuda-graphs", action="store_true")
     parser.add_argument("--warmup-prompts", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
@@ -252,11 +254,13 @@ def main() -> None:
     target_model = Qwen3ForCausalLM.from_pretrained(args.model_path, device=args.device, dtype=dtype)
     draft_model = load_draft_checkpoint(args.checkpoint_path, device=args.device, dtype=dtype)
 
-    compile_enabled = False
-    if args.compile:
+    compile_target = args.compile or args.compile_target
+    compile_draft = args.compile or args.compile_draft
+    compile_enabled = compile_target or compile_draft
+    if compile_target:
         target_model = torch.compile(target_model, mode="reduce-overhead")
+    if compile_draft:
         draft_model = torch.compile(draft_model, mode="reduce-overhead")
-        compile_enabled = True
 
     output_path = Path(args.output)
     if output_path.exists():

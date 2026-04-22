@@ -1,0 +1,10 @@
+{
+  "num_records": 50.0,
+  "mean_speedup": 0.6813917543252482,
+  "mean_acceptance_rate": 0.8608945440524388,
+  "mean_method_tokens_per_s": 35.18513574218203,
+  "mean_baseline_tokens_per_s": 51.62482686050707,
+  "method": "draft_model",
+  "num_prompts": 50,
+  "output": "runs/draft_model_qwen25_05b_2ep_len2.jsonl"
+}

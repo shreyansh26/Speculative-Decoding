@@ -134,6 +134,7 @@ class Qwen3Attention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_queries_per_kv = self.num_attention_heads // self.num_key_value_heads
         self.head_dim = config.head_dim
+        self.fast_single_token_gqa = False
 
         self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=True)
         self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=True)
@@ -164,6 +165,12 @@ class Qwen3Attention(nn.Module):
             value = torch.cat([layer_cache.value, value], dim=2)
 
         updated_cache = LayerCache(key=key, value=value)
+        use_manual_gqa = self.num_queries_per_kv > 1 and not (
+            self.fast_single_token_gqa and query_len == 1
+        )
+        if use_manual_gqa:
+            key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
+            value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
         key_len = key.shape[2]
         past_len = key_len - query_len
         query_positions = torch.arange(past_len, past_len + query_len, device=hidden_states.device).unsqueeze(-1)
@@ -178,7 +185,7 @@ class Qwen3Attention(nn.Module):
             attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False,
-            enable_gqa=self.num_queries_per_kv > 1,
+            enable_gqa=self.num_queries_per_kv > 1 and not use_manual_gqa,
         )
         attn_output = attn_output.transpose(1, 2).contiguous().view(
             batch_size,
@@ -296,6 +303,11 @@ class Qwen3ForCausalLM(nn.Module):
     @property
     def device(self) -> torch.device:
         return next(self.parameters()).device
+
+    def set_fast_single_token_gqa(self, enabled: bool) -> None:
+        for layer in self.model.layers:
+            layer.self_attn.fast_single_token_gqa = enabled
+
 
     def forward(
         self,

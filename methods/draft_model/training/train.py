@@ -335,6 +335,7 @@ def load_draft_checkpoint(
     if dtype is not None and str(device) != "cpu":
         model = model.to(dtype=dtype)
     model = model.to(device=device)
+    model.set_fast_single_token_gqa(True)
     return model
 
 
