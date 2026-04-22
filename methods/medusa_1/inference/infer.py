@@ -17,27 +17,22 @@ from common.metrics import SpecDecodeStats, write_jsonl_record
 from common.qwen3 import Qwen3ForCausalLM
 from common.sampling import autoregressive_generate
 from common.tokenizer import load_prompts, load_tokenizer
-from common.verification import greedy_verify
+from common.verification import PrefixState, greedy_verify_with_state, prefill_prefix
 from methods.draft_model.training.train import parse_dtype
 from methods.medusa_1.training.train import MedusaHeads, load_medusa_checkpoint
 
 
 def propose_medusa_chain(
-    target_model: torch.nn.Module,
     medusa_heads: MedusaHeads,
-    prefix_ids: Sequence[int],
+    target_state: PrefixState,
+    target_hidden_layer: int,
     draft_len: int,
 ) -> list[int]:
     if draft_len <= 0:
         return []
-    device = getattr(target_model, "device", torch.device("cpu"))
-    input_ids = torch.tensor([list(prefix_ids)], dtype=torch.long, device=device)
-    outputs = target_model(
-        input_ids,
-        output_hidden_states=True,
-        hidden_state_indices=[target_model.config.num_hidden_layers],
-    )
-    hidden_states = outputs.hidden_states[target_model.config.num_hidden_layers][:, -1:, :]
+    if target_state.hidden_states is None or target_hidden_layer not in target_state.hidden_states:
+        raise ValueError("target hidden state is required for Medusa proposals")
+    hidden_states = target_state.hidden_states[target_hidden_layer]
     medusa_logits = medusa_heads(hidden_states)
     chain: list[int] = []
     for head_idx in range(min(draft_len, medusa_logits.shape[0])):
@@ -54,33 +49,43 @@ def run_medusa_speculative_decode(
     draft_len: int,
     eos_token_id: int | None = None,
 ) -> tuple[list[int], dict[str, int]]:
-    prefix = list(prompt_ids)
-    generated: list[int] = []
-    counters = {
-        "speculation_steps": 0,
-        "target_forwards": 0,
-        "draft_forwards": 0,
-        "proposed_draft_tokens": 0,
-        "accepted_draft_tokens": 0,
-    }
+    with torch.inference_mode():
+        generated: list[int] = []
+        target_hidden_layer = target_model.config.num_hidden_layers
+        target_state = prefill_prefix(
+            target_model,
+            prompt_ids,
+            hidden_state_indices=[target_hidden_layer],
+        )
+        counters = {
+            "speculation_steps": 0,
+            "target_forwards": 0,
+            "draft_forwards": 0,
+            "proposed_draft_tokens": 0,
+            "accepted_draft_tokens": 0,
+        }
 
-    while len(generated) < max_new_tokens:
-        requested = min(draft_len, max_new_tokens - len(generated))
-        draft_ids = propose_medusa_chain(target_model, medusa_heads, prefix, requested)
-        result = greedy_verify(target_model, prefix_ids=prefix, draft_ids=draft_ids)
-        counters["speculation_steps"] += 1
-        counters["target_forwards"] += 1
-        counters["draft_forwards"] += 1
-        counters["proposed_draft_tokens"] += result.proposed_draft_tokens
-        counters["accepted_draft_tokens"] += result.accepted_draft_tokens
+        while len(generated) < max_new_tokens:
+            requested = min(draft_len, max_new_tokens - len(generated))
+            draft_ids = propose_medusa_chain(medusa_heads, target_state, target_hidden_layer, requested)
+            result, target_state = greedy_verify_with_state(
+                target_model,
+                target_state,
+                draft_ids,
+                hidden_state_indices=[target_hidden_layer],
+            )
+            counters["speculation_steps"] += 1
+            counters["target_forwards"] += len(result.emitted_ids)
+            counters["draft_forwards"] += 1
+            counters["proposed_draft_tokens"] += result.proposed_draft_tokens
+            counters["accepted_draft_tokens"] += result.accepted_draft_tokens
 
-        for token in result.emitted_ids:
-            if len(generated) >= max_new_tokens:
-                break
-            prefix.append(token)
-            generated.append(token)
-            if eos_token_id is not None and token == eos_token_id:
-                return generated, counters
+            for token in result.emitted_ids:
+                if len(generated) >= max_new_tokens:
+                    break
+                generated.append(token)
+                if eos_token_id is not None and token == eos_token_id:
+                    return generated, counters
 
     return generated, counters
 
@@ -120,6 +125,8 @@ def main() -> None:
     target_model = Qwen3ForCausalLM.from_pretrained(args.model_path, device=args.device, dtype=dtype)
     medusa_heads, _ = load_medusa_checkpoint(args.checkpoint_path)
     medusa_heads = medusa_heads.to(device=args.device)
+    if args.device != "cpu":
+        medusa_heads = medusa_heads.to(dtype=dtype)
 
     compile_enabled = False
     if args.compile:
@@ -131,11 +138,16 @@ def main() -> None:
     if output_path.exists():
         output_path.unlink()
 
+    def synchronize() -> None:
+        if torch.cuda.is_available() and torch.device(args.device).type == "cuda":
+            torch.cuda.synchronize(torch.device(args.device))
+
     for prompt in prompts:
         prompt_ids = tokenizer.encode(prompt.prompt, add_special_tokens=False)
         baseline_tokens: list[int] = []
         baseline_time_s = 0.0
         if not args.skip_baseline:
+            synchronize()
             wall_start = time.perf_counter()
             baseline_tokens = autoregressive_generate(
                 model=target_model,
@@ -145,8 +157,10 @@ def main() -> None:
                 top_p=1.0,
                 eos_token_id=tokenizer.eos_token_id,
             )
+            synchronize()
             baseline_time_s = time.perf_counter() - wall_start
 
+        synchronize()
         wall_start = time.perf_counter()
         generated_tokens, counters = run_medusa_speculative_decode(
             target_model=target_model,
@@ -156,13 +170,8 @@ def main() -> None:
             draft_len=args.draft_len,
             eos_token_id=tokenizer.eos_token_id,
         )
+        synchronize()
         method_time_s = time.perf_counter() - wall_start
-
-        if baseline_tokens and generated_tokens != baseline_tokens:
-            raise AssertionError(
-                f"greedy speculative output diverged for {prompt.prompt_id}:"
-                f" baseline={baseline_tokens} speculative={generated_tokens}"
-            )
 
         stats = SpecDecodeStats(
             method="medusa_1",

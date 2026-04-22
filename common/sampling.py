@@ -45,21 +45,45 @@ def autoregressive_generate(
         raise ValueError("prompt_ids must not be empty")
 
     device = getattr(model, "device", torch.device("cpu"))
-    sequence = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
     generated: list[int] = []
 
-    for _ in range(max_new_tokens):
-        output = model(sequence)
-        next_token = sample_from_logits(
-            output.logits[0, -1],
-            temperature=temperature,
-            top_p=top_p,
-            generator=generator,
-        )
-        generated.append(next_token)
-        next_token_tensor = torch.tensor([[next_token]], dtype=torch.long, device=device)
-        sequence = torch.cat([sequence, next_token_tensor], dim=1)
-        if eos_token_id is not None and next_token == eos_token_id:
-            break
+    with torch.inference_mode():
+        if hasattr(model, "prefill") and hasattr(model, "decode_one"):
+            sequence = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
+            output = model.prefill(sequence)
+            cache = output.cache
+            next_logits = output.logits[0, -1]
+
+            for _ in range(max_new_tokens):
+                next_token = sample_from_logits(
+                    next_logits,
+                    temperature=temperature,
+                    top_p=top_p,
+                    generator=generator,
+                )
+                generated.append(next_token)
+                if eos_token_id is not None and next_token == eos_token_id:
+                    break
+                next_token_tensor = torch.tensor([[next_token]], dtype=torch.long, device=device)
+                output = model.decode_one(next_token_tensor, cache=cache)
+                cache = output.cache
+                next_logits = output.logits[0, -1]
+
+            return generated
+
+        sequence = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
+        for _ in range(max_new_tokens):
+            output = model(sequence)
+            next_token = sample_from_logits(
+                output.logits[0, -1],
+                temperature=temperature,
+                top_p=top_p,
+                generator=generator,
+            )
+            generated.append(next_token)
+            next_token_tensor = torch.tensor([[next_token]], dtype=torch.long, device=device)
+            sequence = torch.cat([sequence, next_token_tensor], dim=1)
+            if eos_token_id is not None and next_token == eos_token_id:
+                break
 
     return generated

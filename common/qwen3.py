@@ -118,6 +118,8 @@ def apply_rotary_embeddings(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    cos = cos.to(dtype=query.dtype)
+    sin = sin.to(dtype=query.dtype)
     cos = cos[:, None, :, :]
     sin = sin[:, None, :, :]
     query = (query * cos) + (rotate_half(query) * sin)
@@ -162,10 +164,6 @@ class Qwen3Attention(nn.Module):
             value = torch.cat([layer_cache.value, value], dim=2)
 
         updated_cache = LayerCache(key=key, value=value)
-        if self.num_queries_per_kv > 1:
-            key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
-            value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
-
         key_len = key.shape[2]
         past_len = key_len - query_len
         query_positions = torch.arange(past_len, past_len + query_len, device=hidden_states.device).unsqueeze(-1)
@@ -180,6 +178,7 @@ class Qwen3Attention(nn.Module):
             attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False,
+            enable_gqa=self.num_queries_per_kv > 1,
         )
         attn_output = attn_output.transpose(1, 2).contiguous().view(
             batch_size,
@@ -350,33 +349,15 @@ class Qwen3ForCausalLM(nn.Module):
         output_hidden_states: bool = False,
         hidden_state_indices: Iterable[int] | None = None,
     ) -> Qwen3Output:
-        working_cache = cache
-        collected_logits = []
-        collected_hidden_states: dict[int, list[torch.Tensor]] | None = {} if output_hidden_states else None
-
-        for index in range(input_ids.shape[1]):
-            output = self.decode_one(
-                input_ids[:, index : index + 1],
-                cache=working_cache,
-                output_hidden_states=output_hidden_states,
-                hidden_state_indices=hidden_state_indices,
-            )
-            collected_logits.append(output.logits)
-            working_cache = output.cache
-            if output_hidden_states and output.hidden_states is not None and collected_hidden_states is not None:
-                for layer_idx, tensor in output.hidden_states.items():
-                    collected_hidden_states.setdefault(layer_idx, []).append(tensor)
-
-        hidden_states = None
-        if collected_hidden_states is not None:
-            hidden_states = {
-                layer_idx: torch.cat(parts, dim=1)
-                for layer_idx, parts in collected_hidden_states.items()
-            }
-        return Qwen3Output(
-            logits=torch.cat(collected_logits, dim=1),
-            hidden_states=hidden_states,
-            cache=working_cache,
+        if input_ids.shape[1] <= 0:
+            raise ValueError("decode_many expects at least one token per batch element")
+        # Verification needs one cached forward over the full drafted chunk. Iterating
+        # token-by-token here collapses speculative decoding back to baseline behavior.
+        return self.forward(
+            input_ids=input_ids,
+            cache=cache,
+            output_hidden_states=output_hidden_states,
+            hidden_state_indices=hidden_state_indices,
         )
 
     @classmethod
