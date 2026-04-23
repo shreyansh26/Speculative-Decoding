@@ -331,16 +331,20 @@ def greedy_verify_with_state(
 
         accepted_ids = [int(token) for token in draft_ids[:accepted_count]]
         if accepted_count < len(draft_ids):
-            accepted_state = (
-                state if accepted_count == 0 else state_after_decoded_tokens(state, output, accepted_ids)
-            )
             mismatch_token = int(predictions[accepted_count])
-            updated_state = advance_prefix_state(
-                model,
-                accepted_state,
-                mismatch_token,
-                hidden_state_indices=hidden_state_indices,
-            )
+            if accepted_count == 0:
+                updated_state = advance_prefix_state(
+                    model,
+                    state,
+                    mismatch_token,
+                    hidden_state_indices=hidden_state_indices,
+                )
+            else:
+                updated_state = prefill_prefix(
+                    model,
+                    state.prefix_ids + accepted_ids + [mismatch_token],
+                    hidden_state_indices=hidden_state_indices,
+                )
             return VerificationResult(
                 accepted_ids=accepted_ids,
                 emitted_ids=accepted_ids + [mismatch_token],
@@ -351,14 +355,20 @@ def greedy_verify_with_state(
                 bonus_token=None,
             ), updated_state
 
-        accepted_state = state if not accepted_ids else state_after_decoded_tokens(state, output, accepted_ids)
         bonus_token = int(predictions[-1])
-        updated_state = advance_prefix_state(
-            model,
-            accepted_state,
-            bonus_token,
-            hidden_state_indices=hidden_state_indices,
-        )
+        if not accepted_ids:
+            updated_state = advance_prefix_state(
+                model,
+                state,
+                bonus_token,
+                hidden_state_indices=hidden_state_indices,
+            )
+        else:
+            updated_state = prefill_prefix(
+                model,
+                state.prefix_ids + accepted_ids + [bonus_token],
+                hidden_state_indices=hidden_state_indices,
+            )
         return VerificationResult(
             accepted_ids=accepted_ids,
             emitted_ids=accepted_ids + [bonus_token],

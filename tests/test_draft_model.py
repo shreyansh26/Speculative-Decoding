@@ -96,6 +96,44 @@ def test_draft_model_inference_matches_toy_bigram_baseline() -> None:
     assert counters["draft_forwards"] >= counters["speculation_steps"]
 
 
+def test_draft_model_inference_matches_baseline_with_mismatched_real_models() -> None:
+    target_model = build_draft_model(
+        vocab_size=32,
+        max_position_embeddings=32,
+        config=MiniQwenConfig(
+            hidden_size=32,
+            num_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            intermediate_size=64,
+        ),
+    )
+    draft_model = build_draft_model(
+        vocab_size=32,
+        max_position_embeddings=32,
+        config=MiniQwenConfig(
+            hidden_size=32,
+            num_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            intermediate_size=64,
+        ),
+    )
+    prompt = [1, 2, 3, 4]
+    baseline = autoregressive_generate(target_model, prompt, max_new_tokens=8, temperature=0.0)
+    speculative, _ = run_draft_model_speculative_decode(
+        target_model=target_model,
+        draft_model=draft_model,
+        prompt_ids=prompt,
+        max_new_tokens=8,
+        draft_len=2,
+        temperature=0.0,
+        top_p=1.0,
+        eos_token_id=None,
+    )
+    assert speculative == baseline
+
+
 class FakeTokenizer:
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
         return [index + 1 for index, _ in enumerate(text)]

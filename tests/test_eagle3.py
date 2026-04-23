@@ -4,7 +4,7 @@ import torch
 
 from common.sampling import autoregressive_generate
 from methods.eagle3.inference.infer import run_eagle3_speculative_decode
-from methods.eagle3.training.train import Eagle3Drafter, fuse_hidden_states, run_drafter_training_step
+from methods.eagle3.training.train import Eagle3Config, Eagle3Drafter, fuse_hidden_states, run_drafter_training_step
 
 
 class ToyEagleOutput:
@@ -39,23 +39,56 @@ def test_hidden_layer_fusion_shape_is_correct() -> None:
 
 
 def test_training_time_test_loop_runs() -> None:
-    drafter = Eagle3Drafter(hidden_size=4, vocab_size=8)
+    config = Eagle3Config(
+        hidden_size=4,
+        vocab_size=8,
+        intermediate_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        rms_norm_eps=1e-5,
+        rope_theta=10000.0,
+        selected_layers=(0, 1, 2),
+        draft_len=2,
+        ttt_steps=4,
+    )
+    drafter = Eagle3Drafter(config)
     fused = torch.randn(2, 12)
     prev = torch.tensor([1, 2], dtype=torch.long)
-    labels = torch.tensor([[2, 3], [3, 1]], dtype=torch.long)
+    labels = torch.tensor([[2, 3, 1, 2], [3, 1, 2, 3]], dtype=torch.long)
     loss = run_drafter_training_step(drafter, fused, prev, labels, mode="training_time_test")
     assert loss.ndim == 0
 
 
 def test_greedy_output_equals_baseline() -> None:
     target = ToyEagleTarget(vocab_size=8)
-    drafter = Eagle3Drafter(hidden_size=8, vocab_size=8)
+    config = Eagle3Config(
+        hidden_size=8,
+        vocab_size=8,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        rms_norm_eps=1e-5,
+        rope_theta=10000.0,
+        selected_layers=(0, 1, 2),
+        draft_len=2,
+        ttt_steps=2,
+    )
+    drafter = Eagle3Drafter(config)
     drafter.feature_fuser.weight.data.zero_()
     drafter.feature_fuser.bias.data.zero_()
-    drafter.rnn.weight_ih.data.zero_()
-    drafter.rnn.weight_hh.data.zero_()
-    drafter.rnn.bias_ih.data.zero_()
-    drafter.rnn.bias_hh.data.zero_()
+    for layer in drafter.layers:
+        layer.self_attn.q_proj.weight.data.zero_()
+        layer.self_attn.q_proj.bias.data.zero_()
+        layer.self_attn.k_proj.weight.data.zero_()
+        layer.self_attn.k_proj.bias.data.zero_()
+        layer.self_attn.v_proj.weight.data.zero_()
+        layer.self_attn.v_proj.bias.data.zero_()
+        layer.self_attn.o_proj.weight.data.zero_()
+        layer.mlp.gate_proj.weight.data.zero_()
+        layer.mlp.up_proj.weight.data.zero_()
+        layer.mlp.down_proj.weight.data.zero_()
     drafter.lm_head.weight.data.zero_()
     for token in range(1, 4):
         next_token = ((token - 1) % 3) + 1
