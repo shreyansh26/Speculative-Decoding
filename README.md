@@ -31,12 +31,12 @@ Current reference artifact:
 - checkpoint: `checkpoints/eagle3_qwen25_7b_eval100_ce_len3`
 - vLLM export: `checkpoints/vllm_exports/eagle3_eval100_len2`
 - target model: `Qwen/Qwen2.5-7B-Instruct`
-- train set: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl`
-- eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
+- full distillation set: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl`
+- reference overfit train/eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
 - eval setup: `100` train-overlap prompts, `max_new_tokens=128`
 - best inference draft length: `2`
 
-Latest benchmark results on GPU 4:
+Latest local implementation benchmark results on GPU 4:
 
 | Path | Baseline wall time | EAGLE wall time | Baseline mean latency | EAGLE mean latency | Baseline throughput | EAGLE throughput | Speedup | Acceptance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -44,13 +44,177 @@ Latest benchmark results on GPU 4:
 | vLLM serial latency (`max_num_seqs=1`) | `74.5677s` | `50.2344s` | `0.7457s` | `0.5023s` | `162.35 tok/s` | `241.39 tok/s` | `1.4844x` | `44.72%` |
 | non-vLLM PyTorch loop | `195.8243s` | `155.1596s` | `1.9582s` | `1.5516s` | `61.73 tok/s` | `77.91 tok/s` | `1.2621x` | `36.13%` |
 
+NVIDIA ModelOpt comparison on the same 100-prompt eval slice:
+
+| Path | Baseline wall time | ModelOpt EAGLE wall time | Baseline mean latency | ModelOpt EAGLE mean latency | Baseline throughput | ModelOpt EAGLE throughput | Speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| vLLM batched throughput (`max_num_seqs=16`) | `6.7298s` | `5.6747s` | n/a | n/a | `1800.66 tok/s` | `2136.67 tok/s` | `1.1859x` | `42.92%` |
+| vLLM serial latency (`max_num_seqs=1`) | `74.5472s` | `51.8290s` | `0.7455s` | `0.5183s` | `162.39 tok/s` | `233.96 tok/s` | `1.4383x` | `41.95%` |
+
 Benchmark files:
 
 - vLLM batched: `runs/eagle3_eval100_ce_len2_vllm_batched.summary.json`
 - vLLM serial: `runs/eagle3_eval100_ce_len2_vllm_serial.summary.json`
 - non-vLLM: `runs/eagle3_eval100_ce_len2_nonvllm.jsonl`
+- ModelOpt vLLM batched: `runs/eagle3_modelopt_eval100_len2_vllm_batched.summary.json`
+- ModelOpt vLLM serial: `runs/eagle3_modelopt_eval100_len2_vllm_serial.summary.json`
 
 Output divergence from the baseline is diagnostic only for EAGLE-3 runs. The benchmark records `matches_baseline`, diverged prompt counts, and token-count mismatches, but speedup is computed from the measured wall time and generated-token throughput.
+
+### Local EAGLE-3 Commands
+
+Prepare the UltraChat distillation data with vLLM greedy completions:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+. .venv/bin/activate
+python methods/eagle3/training/train.py prepare-data \
+  --target-model-path Qwen/Qwen2.5-7B-Instruct \
+  --output data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl \
+  --eval-output data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --num-samples 3000 \
+  --eval-samples 100 \
+  --max-prompt-tokens 1024 \
+  --completion-tokens 128 \
+  --dtype bf16 \
+  --gpu-memory-utilization 0.75 \
+  --max-model-len 1184
+```
+
+Train the current reference local checkpoint:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+. .venv/bin/activate
+python methods/eagle3/training/train.py train \
+  --target-model-path Qwen/Qwen2.5-7B-Instruct \
+  --data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output checkpoints/eagle3_qwen25_7b_eval100_ce_len3 \
+  --seq-len 1152 \
+  --steps 3000 \
+  --batch-size 1 \
+  --grad-accum 1 \
+  --lr 1e-4 \
+  --draft-len 3 \
+  --ttt-steps 3 \
+  --num-draft-layers 1 \
+  --selected-layers 1,13,24 \
+  --loss-decay 1.0 \
+  --loss-type ce \
+  --grad-clip 0.5 \
+  --dtype bf16 \
+  --device cuda
+```
+
+Run non-vLLM PyTorch inference:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+. .venv/bin/activate
+python methods/eagle3/inference/infer.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --checkpoint-path checkpoints/eagle3_qwen25_7b_eval100_ce_len3 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/eagle3_eval100_ce_len2_nonvllm.jsonl \
+  --max-new-tokens 128 \
+  --draft-len 2 \
+  --dtype bf16 \
+  --device cuda \
+  --allow-divergence
+```
+
+Run vLLM batched throughput inference:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+. .venv/bin/activate
+python methods/eagle3/inference/infer_vllm.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --checkpoint-path checkpoints/eagle3_qwen25_7b_eval100_ce_len3 \
+  --export-dir checkpoints/vllm_exports/eagle3_eval100_len2 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/eagle3_eval100_ce_len2_vllm_batched.summary.json \
+  --baseline-summary-path runs/eagle3_eval100_ce_len2_vllm_batched.baseline.json \
+  --max-new-tokens 128 \
+  --draft-len 2 \
+  --gpu-memory-utilization 0.4 \
+  --max-model-len 1280 \
+  --max-num-seqs 16 \
+  --warmup-prompts 0
+```
+
+Run vLLM serial latency inference:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+. .venv/bin/activate
+python methods/eagle3/inference/infer_vllm.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --draft-model-path checkpoints/vllm_exports/eagle3_eval100_len2 \
+  --skip-export \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/eagle3_eval100_ce_len2_vllm_serial.summary.json \
+  --baseline-summary-path runs/eagle3_eval100_ce_len2_vllm_serial.baseline.json \
+  --max-new-tokens 128 \
+  --draft-len 2 \
+  --gpu-memory-utilization 0.4 \
+  --max-model-len 1280 \
+  --max-num-seqs 1 \
+  --serial-prompts \
+  --warmup-prompts 1
+```
+
+### ModelOpt EAGLE-3 Comparison Commands
+
+The ModelOpt path is intentionally isolated in `methods/eagle3/modelopt_experiment.py` so it can be deleted without touching the local implementation. It trains with `modelopt.torch.speculative`, exports the official ModelOpt checkpoint, converts it to the vLLM/speculators checkpoint layout, and benchmarks through the same local vLLM runner. ModelOpt comparison inference is vLLM-only.
+
+One-time experiment dependencies:
+
+```bash
+mkdir -p ref_repos
+if [ ! -d ref_repos/Model-Optimizer ]; then
+  git clone https://github.com/NVIDIA/Model-Optimizer.git ref_repos/Model-Optimizer
+fi
+uv pip install --python .venv/bin/python -e ref_repos/Model-Optimizer \
+  accelerate peft scipy pulp nvidia-ml-py omegaconf
+```
+
+Train, export, convert, and run the default batched vLLM benchmark:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+. .venv/bin/activate
+python methods/eagle3/modelopt_experiment.py \
+  --mode all \
+  --overwrite-data \
+  --overwrite-output-dir \
+  --overwrite-exports
+```
+
+Run only the ModelOpt vLLM batched benchmark after the export exists:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+. .venv/bin/activate
+python methods/eagle3/modelopt_experiment.py \
+  --mode bench \
+  --max-num-seqs 16 \
+  --summary-output runs/eagle3_modelopt_eval100_len2_vllm_batched.summary.json \
+  --baseline-summary-path runs/eagle3_modelopt_eval100_len2_vllm_batched.baseline.json
+```
+
+Run only the ModelOpt vLLM serial latency benchmark after the export exists:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+. .venv/bin/activate
+python methods/eagle3/modelopt_experiment.py \
+  --mode bench \
+  --serial-prompts \
+  --max-num-seqs 1 \
+  --summary-output runs/eagle3_modelopt_eval100_len2_vllm_serial.summary.json \
+  --baseline-summary-path runs/eagle3_modelopt_eval100_len2_vllm_serial.baseline.json
+```
 
 ## Draft Model
 
