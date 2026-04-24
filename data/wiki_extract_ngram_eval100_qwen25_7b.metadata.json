@@ -1,0 +1,49 @@
+{
+  "model_path": "Qwen/Qwen2.5-7B-Instruct",
+  "num_questions": 100,
+  "titles": [
+    "Water cycle",
+    "Photosynthesis",
+    "Plate tectonics",
+    "Solar System",
+    "Renaissance"
+  ],
+  "prompt_token_budget": 14336,
+  "articles": [
+    {
+      "title": "Water cycle",
+      "questions": 20,
+      "article_chars": 18572,
+      "min_prompt_tokens": 4030,
+      "max_prompt_tokens": 4038
+    },
+    {
+      "title": "Photosynthesis",
+      "questions": 20,
+      "article_chars": 50069,
+      "min_prompt_tokens": 10891,
+      "max_prompt_tokens": 10903
+    },
+    {
+      "title": "Plate tectonics",
+      "questions": 20,
+      "article_chars": 59056,
+      "min_prompt_tokens": 12330,
+      "max_prompt_tokens": 12346
+    },
+    {
+      "title": "Solar System",
+      "questions": 20,
+      "article_chars": 61337,
+      "min_prompt_tokens": 13744,
+      "max_prompt_tokens": 13755
+    },
+    {
+      "title": "Renaissance",
+      "questions": 20,
+      "article_chars": 64762,
+      "min_prompt_tokens": 13804,
+      "max_prompt_tokens": 13812
+    }
+  ]
+}
