@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Medusa-1 non-vLLM inference with tree verification.
 

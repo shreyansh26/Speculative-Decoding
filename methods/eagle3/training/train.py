@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Minimal EAGLE-3 trainer: fuse low/mid/high target hidden states, then predict a
 short draft sequence with a lightweight transformer drafter.

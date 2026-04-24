@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Medusa-1 trains lightweight future-token heads on top of a frozen target LM.
 

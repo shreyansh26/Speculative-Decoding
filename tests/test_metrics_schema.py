@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 
 from common.metrics import REQUIRED_METRIC_KEYS, SpecDecodeStats, summarize_jsonl, write_jsonl_record

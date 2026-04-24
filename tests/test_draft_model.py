@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import torch
 
 from common.sampling import autoregressive_generate

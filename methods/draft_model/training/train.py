@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Draft-model training builds a compact Qwen-like LM that shares the target
 tokenizer, then saves only the draft model weights and config for speculation.

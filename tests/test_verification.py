@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from common.sampling import autoregressive_generate
 from common.toy_models import ToyIncrementLM
 from common.verification import greedy_verify, run_greedy_speculative_decode

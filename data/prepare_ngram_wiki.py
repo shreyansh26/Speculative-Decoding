@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Prepare extractive Wikipedia prompts for n-gram speculative decoding.
 

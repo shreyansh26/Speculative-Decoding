@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Standalone NVIDIA ModelOpt EAGLE-3 comparison script.
 

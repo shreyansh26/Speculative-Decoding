@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Draft-target speculative decoding uses a compact autoregressive draft model to
 propose K tokens, then verifies that chain against the target in one pass.

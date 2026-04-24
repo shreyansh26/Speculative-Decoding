@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Minimal EAGLE-3 inference: fuse low/mid/high target states, sequentially draft
 tokens with the Eagle transformer head, then verify against the target model.
