@@ -17,6 +17,17 @@ Execution order follows `plans/plan.md`:
 6. Phase 5: EAGLE-3
 7. Phase 6: suffix decoding
 
+## Implemented Methods
+
+| Method | Directory | Summary | Runtime support |
+| --- | --- | --- | --- |
+| N-gram prompt lookup | `methods/ngram` | Training-free proposer that finds repeated n-grams in the current prompt and accepted generation history, then verifies drafted continuations with the target model. | non-vLLM and vLLM |
+| Draft model | `methods/draft_model` | Small Qwen-style draft LM trained from Qwen2.5-7B greedy completions, then used with standard speculative verification. | non-vLLM and vLLM |
+| Medusa-1 | `methods/medusa_1` | Frozen-backbone future-token heads trained on target completions; non-vLLM inference verifies top-k Medusa tree candidates with a masked Qwen tree forward. | non-vLLM |
+| PARD / parallel draft models | `methods/parallel_draft_models` | Parallel future-token heads that predict multiple draft positions in one target-state pass, with local and vLLM benchmark paths. | non-vLLM and vLLM |
+| EAGLE-3 | `methods/eagle3` | Low/mid/high hidden-state fusion with a lightweight autoregressive drafter, plus a ModelOpt comparison workflow. | non-vLLM and vLLM |
+| Suffix decoding | `methods/suffix_decoding` | Training-free suffix-frequency proposer over prompt/generated history, with optional bounded cache persistence and target verification. | non-vLLM and vLLM |
+
 The project uses `uv` with Python 3.12:
 
 ```bash
