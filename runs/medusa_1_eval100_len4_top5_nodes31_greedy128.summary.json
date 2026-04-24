@@ -1,0 +1,18 @@
+{
+  "num_records": 100.0,
+  "mean_speedup": 2.298623455105043,
+  "mean_acceptance_rate": 0.40772641068760457,
+  "mean_method_tokens_per_s": 146.23467893641117,
+  "mean_baseline_tokens_per_s": 63.68484579455392,
+  "method": "medusa_1",
+  "num_prompts": 100,
+  "output": "runs/medusa_1_eval100_len4_top5_nodes31_greedy128.jsonl",
+  "matches_baseline": false,
+  "diverged_prompts": 55,
+  "first_diverged_prompt_id": "467a64126d3ce674bfe3093e3c1e65b87b06d03082fea34061fbdf20f1ba7bb1",
+  "token_count_mismatches": 4,
+  "draft_len": 4,
+  "tree_topk": 5,
+  "max_tree_nodes": 31,
+  "allow_divergence": false
+}

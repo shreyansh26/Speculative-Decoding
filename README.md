@@ -24,6 +24,69 @@ uv venv --python 3.12 .venv
 uv pip install -e .
 ```
 
+## Medusa-1
+
+Current reference artifacts:
+
+- local checkpoint: `checkpoints/medusa_1_qwen25_7b_eval100`
+- target model: `Qwen/Qwen2.5-7B-Instruct`
+- train/eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
+- eval setup: `100` train-overlap prompts, `max_new_tokens=128`
+- best inference settings: `draft_len=4`, `tree_topk=5`, `max_tree_nodes=31`
+
+The Medusa-1 implementation is non-vLLM only. It trains frozen-backbone future-token heads and verifies Medusa tree candidates with a local masked Qwen tree forward. Output divergence from the baseline is diagnostic only for this method; the benchmark records baseline-match fields, but speedup is computed from measured wall time and generated-token throughput.
+
+Latest local non-vLLM benchmark on GPU 4:
+
+| Path | Eval prompts | Max new tokens | Baseline throughput | Medusa throughput | Speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| non-vLLM PyTorch loop | `100` | `128` | `63.68 tok/s` | `146.23 tok/s` | `2.2986x` | `40.77%` |
+
+Benchmark file:
+
+- non-vLLM: `runs/medusa_1_eval100_len4_top5_nodes31_greedy128.jsonl`, `runs/medusa_1_eval100_len4_top5_nodes31_greedy128.summary.json`
+
+Train the current reference checkpoint:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+. .venv/bin/activate
+python methods/medusa_1/training/train.py \
+  --target-model-path Qwen/Qwen2.5-7B-Instruct \
+  --data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --eval-data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output checkpoints/medusa_1_qwen25_7b_eval100 \
+  --seq-len 1152 \
+  --steps 300 \
+  --batch-size 1 \
+  --grad-accum 1 \
+  --lr 1e-3 \
+  --max-grad-norm 1.0 \
+  --dtype bf16 \
+  --device cuda \
+  --limit-samples 100 \
+  --eval-batches 8
+```
+
+Run non-vLLM PyTorch inference:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+. .venv/bin/activate
+python methods/medusa_1/inference/infer.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --checkpoint-path checkpoints/medusa_1_qwen25_7b_eval100 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/medusa_1_eval100_len4_top5_nodes31_greedy128.jsonl \
+  --max-new-tokens 128 \
+  --draft-len 4 \
+  --tree-topk 5 \
+  --max-tree-nodes 31 \
+  --dtype bf16 \
+  --device cuda \
+  --warmup-prompts 2
+```
+
 ## EAGLE-3
 
 Current reference artifacts:
