@@ -24,6 +24,34 @@ uv venv --python 3.12 .venv
 uv pip install -e .
 ```
 
+## EAGLE-3
+
+Current reference artifact:
+
+- checkpoint: `checkpoints/eagle3_qwen25_7b_eval100_ce_len3`
+- vLLM export: `checkpoints/vllm_exports/eagle3_eval100_len2`
+- target model: `Qwen/Qwen2.5-7B-Instruct`
+- train set: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl`
+- eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
+- eval setup: `100` train-overlap prompts, `max_new_tokens=128`
+- best inference draft length: `2`
+
+Latest benchmark results on GPU 4:
+
+| Path | Baseline wall time | EAGLE wall time | Baseline mean latency | EAGLE mean latency | Baseline throughput | EAGLE throughput | Speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| vLLM batched throughput (`max_num_seqs=16`) | `6.6325s` | `5.3677s` | n/a | n/a | `1827.83 tok/s` | `2258.50 tok/s` | `1.2356x` | `46.79%` |
+| vLLM serial latency (`max_num_seqs=1`) | `74.5677s` | `50.2344s` | `0.7457s` | `0.5023s` | `162.35 tok/s` | `241.39 tok/s` | `1.4844x` | `44.72%` |
+| non-vLLM PyTorch loop | `195.8243s` | `155.1596s` | `1.9582s` | `1.5516s` | `61.73 tok/s` | `77.91 tok/s` | `1.2621x` | `36.13%` |
+
+Benchmark files:
+
+- vLLM batched: `runs/eagle3_eval100_ce_len2_vllm_batched.summary.json`
+- vLLM serial: `runs/eagle3_eval100_ce_len2_vllm_serial.summary.json`
+- non-vLLM: `runs/eagle3_eval100_ce_len2_nonvllm.jsonl`
+
+Output divergence from the baseline is diagnostic only for EAGLE-3 runs. The benchmark records `matches_baseline`, diverged prompt counts, and token-count mismatches, but speedup is computed from the measured wall time and generated-token throughput.
+
 ## Draft Model
 
 Current reference artifact:
