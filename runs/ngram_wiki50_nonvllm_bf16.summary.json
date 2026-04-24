@@ -1,0 +1,18 @@
+{
+  "num_records": 50.0,
+  "mean_speedup": 2.1818031059501815,
+  "mean_acceptance_rate": 0.8004991435665302,
+  "mean_method_tokens_per_s": 81.21340689877354,
+  "mean_baseline_tokens_per_s": 34.786181465468864,
+  "method": "ngram",
+  "num_prompts": 50,
+  "output": "runs/ngram_wiki50_nonvllm_bf16.jsonl",
+  "matches_baseline": false,
+  "diverged_prompts": 1,
+  "first_diverged_prompt_id": "wiki_0029",
+  "token_count_mismatches": 1,
+  "draft_len": 5,
+  "prompt_lookup_min": 3,
+  "prompt_lookup_max": 8,
+  "max_model_len": 16384
+}

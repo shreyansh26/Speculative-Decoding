@@ -1,0 +1,20 @@
+{
+  "num_records": 50.0,
+  "mean_speedup": 1.4423989993627901,
+  "mean_acceptance_rate": 0.6199389298657607,
+  "mean_method_tokens_per_s": 51.215474505736395,
+  "mean_baseline_tokens_per_s": 34.63504124868116,
+  "method": "suffix_decoding",
+  "num_prompts": 50,
+  "output": "runs/suffix_wiki50_nonvllm_bf16.jsonl",
+  "matches_baseline": false,
+  "diverged_prompts": 1,
+  "first_diverged_prompt_id": "wiki_0029",
+  "token_count_mismatches": 1,
+  "draft_len": 8,
+  "max_tree_depth": 8,
+  "max_spec_factor": 1.0,
+  "min_token_prob": 0.0,
+  "max_model_len": 16384,
+  "global_cache": ""
+}
