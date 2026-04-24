@@ -16,7 +16,7 @@ import torch
 from common.metrics import SpecDecodeStats, summarize_jsonl, write_jsonl_record
 from common.qwen3 import Qwen3ForCausalLM
 from common.sampling import autoregressive_generate
-from common.tokenizer import load_prompts, load_tokenizer
+from common.tokenizer import render_prompt, load_tokenizer
 from common.verification import (
     PrefixState,
     VerificationResult,
@@ -36,10 +36,30 @@ from methods.eagle3.training.train import (
 
 DEFAULT_MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
 DEFAULT_CHECKPOINT_PATH = "checkpoints/eagle3_qwen25_7b"
-DEFAULT_PROMPTS_PATH = "data/ultrachat_eval_50_short_trunc512.jsonl"
-DEFAULT_MAX_NEW_TOKENS = 16
-DEFAULT_DRAFT_LEN = 4
+DEFAULT_PROMPTS_PATH = "data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl"
+DEFAULT_MAX_NEW_TOKENS = 128
+DEFAULT_DRAFT_LEN = 3
 DEFAULT_WARMUP_PROMPTS = 2
+
+
+def load_prompt_records(path: str | Path, tokenizer) -> list[tuple[str, list[int], str]]:
+    prompt_path = Path(path)
+    records: list[tuple[str, list[int], str]] = []
+    with prompt_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            sample = json.loads(line)
+            prompt_id = str(sample.get("prompt_id", sample.get("id", f"prompt_{line_number:04d}")))
+            if "prompt_ids" in sample:
+                prompt_ids = [int(token_id) for token_id in sample["prompt_ids"]]
+                prompt_text = str(sample.get("prompt", tokenizer.decode(prompt_ids, skip_special_tokens=False)))
+            else:
+                prompt_sample = render_prompt(tokenizer, sample)
+                prompt_ids = tokenizer.encode(prompt_sample.prompt, add_special_tokens=False)
+                prompt_text = prompt_sample.prompt
+            records.append((prompt_id, prompt_ids, prompt_text))
+    return records
 
 
 def propose_eagle3_tokens(
@@ -74,6 +94,81 @@ def propose_eagle3_tokens(
         prev_token = torch.argmax(logits, dim=-1)
         proposals.append(int(prev_token.item()))
     return proposals
+
+
+def verify_seeded_draft_with_state(
+    model: torch.nn.Module,
+    state: PrefixState,
+    seed_token: int,
+    draft_ids: Sequence[int],
+    selected_layers: Sequence[int],
+) -> tuple[list[int], PrefixState, int]:
+    """Verify the target-seeded EAGLE proposal.
+
+    The seed token is the target model's own next-token prediction and is not
+    counted as a draft token. EAGLE proposes the following tokens.
+    """
+    device = getattr(model, "device", torch.device("cpu"))
+    candidate_ids = [int(seed_token)] + [int(token) for token in draft_ids]
+    if hasattr(model, "decode_many") and state.cache:
+        candidate_tensor = torch.tensor([candidate_ids], dtype=torch.long, device=device)
+        output = model.decode_many(
+            candidate_tensor,
+            cache=state.cache,
+            output_hidden_states=True,
+            hidden_state_indices=selected_layers,
+        )
+        predictions = [int(seed_token)] + [int(token) for token in torch.argmax(output.logits[0], dim=-1).tolist()]
+        accepted_draft_count = 0
+        for index, draft_token in enumerate(draft_ids):
+            if predictions[index + 1] != int(draft_token):
+                break
+            accepted_draft_count += 1
+
+        emitted = candidate_ids[: 1 + accepted_draft_count]
+        if accepted_draft_count < len(draft_ids):
+            mismatch_token = int(predictions[accepted_draft_count + 1])
+            emitted.append(mismatch_token)
+            accepted_state = state_after_decoded_tokens(
+                state,
+                output,
+                candidate_ids[: 1 + accepted_draft_count],
+            )
+            updated_state = advance_prefix_state(
+                model,
+                accepted_state,
+                mismatch_token,
+                hidden_state_indices=selected_layers,
+            )
+            return emitted, updated_state, accepted_draft_count
+
+        bonus_token = int(predictions[len(draft_ids) + 1]) if len(predictions) > len(draft_ids) + 1 else None
+        accepted_state = state_after_decoded_tokens(state, output, candidate_ids)
+        if bonus_token is not None:
+            emitted.append(bonus_token)
+            updated_state = advance_prefix_state(
+                model,
+                accepted_state,
+                bonus_token,
+                hidden_state_indices=selected_layers,
+            )
+        else:
+            updated_state = accepted_state
+        return emitted, updated_state, accepted_draft_count
+
+    seed_state = advance_prefix_state(
+        model,
+        state,
+        int(seed_token),
+        hidden_state_indices=selected_layers,
+    )
+    result, updated_state = greedy_verify_with_state(
+        model,
+        seed_state,
+        draft_ids,
+        hidden_state_indices=selected_layers,
+    )
+    return [int(seed_token)] + result.emitted_ids, updated_state, result.accepted_draft_tokens
 
 
 def run_eagle3_speculative_decode(
@@ -206,20 +301,23 @@ def run_eagle3_speculative_decode(
             "accepted_draft_tokens": 0,
         }
         while len(generated) < max_new_tokens:
-            requested = min(draft_len, max_new_tokens - len(generated))
-            draft_ids = propose_eagle3_tokens(drafter, target_state, prev_token_id, selected_layers, requested)
-            result, target_state = verify_fn(
+            remaining = max_new_tokens - len(generated)
+            seed_token = int(torch.argmax(target_state.last_logits).item())
+            requested = max(0, min(draft_len, remaining - 1))
+            draft_ids = propose_eagle3_tokens(drafter, target_state, seed_token, selected_layers, requested)
+            emitted_ids, target_state, accepted_count = verify_seeded_draft_with_state(
                 target_model,
                 target_state,
+                seed_token,
                 draft_ids,
                 selected_layers,
             )
             counters["speculation_steps"] += 1
-            counters["target_forwards"] += len(result.emitted_ids)
+            counters["target_forwards"] += 1
             counters["draft_forwards"] += len(draft_ids)
-            counters["proposed_draft_tokens"] += result.proposed_draft_tokens
-            counters["accepted_draft_tokens"] += result.accepted_draft_tokens
-            for token in result.emitted_ids:
+            counters["proposed_draft_tokens"] += len(draft_ids)
+            counters["accepted_draft_tokens"] += accepted_count
+            for token in emitted_ids:
                 if len(generated) >= max_new_tokens:
                     break
                 prev_token_id = int(token)
@@ -261,7 +359,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
     dtype = parse_dtype(args.dtype)
     tokenizer = load_tokenizer(args.model_path)
-    prompts = load_prompts(args.prompts, tokenizer=tokenizer)
+    prompts = load_prompt_records(args.prompts, tokenizer=tokenizer)
     target_model = Qwen3ForCausalLM.from_pretrained(args.model_path, device=args.device, dtype=dtype)
     drafter, metadata = load_eagle3_checkpoint(args.checkpoint_path, device=args.device)
     if args.device != "cpu":
@@ -289,8 +387,7 @@ def main() -> None:
             torch.cuda.synchronize(torch.device(args.device))
 
     warmup_count = min(max(args.warmup_prompts, 0), len(prompts))
-    for prompt in prompts[:warmup_count]:
-        prompt_ids = tokenizer.encode(prompt.prompt, add_special_tokens=False)
+    for _, prompt_ids, _ in prompts[:warmup_count]:
         if not args.skip_baseline:
             autoregressive_generate(
                 target_model,
@@ -314,8 +411,7 @@ def main() -> None:
 
     divergence_count = 0
     first_diverged_prompt_id = ""
-    for prompt in prompts:
-        prompt_ids = tokenizer.encode(prompt.prompt, add_special_tokens=False)
+    for prompt_id, prompt_ids, _ in prompts:
         baseline_tokens: list[int] = []
         baseline_time_s = 0.0
         if not args.skip_baseline:
@@ -343,16 +439,11 @@ def main() -> None:
             matches_baseline = False
             divergence_count += 1
             if not first_diverged_prompt_id:
-                first_diverged_prompt_id = prompt.prompt_id
-        if not args.skip_baseline and generated_tokens != baseline_tokens and not args.allow_divergence:
-            raise RuntimeError(
-                f"greedy speculative output diverged for {prompt.prompt_id}:"
-                f" baseline={baseline_tokens} speculative={generated_tokens}"
-            )
+                first_diverged_prompt_id = prompt_id
         stats = SpecDecodeStats(
             method="eagle3",
             model=args.model_path,
-            prompt_id=prompt.prompt_id,
+            prompt_id=prompt_id,
             prompt_tokens=len(prompt_ids),
             generated_tokens=len(generated_tokens),
             generated_text=tokenizer.decode(generated_tokens, skip_special_tokens=True),

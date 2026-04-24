@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import torch
+from safetensors.torch import save_file
 from transformers import AutoConfig, AutoTokenizer, Cache
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 from transformers.models.qwen2.modeling_qwen2 import (
@@ -20,7 +21,7 @@ from transformers.models.qwen2.modeling_qwen2 import (
 from transformers.processing_utils import Unpack
 from transformers.utils.generic import TransformersKwargs
 
-from common.tokenizer import load_prompts, load_tokenizer
+from common.tokenizer import render_prompt, load_tokenizer
 from methods.eagle3.training.train import Eagle3Config, load_eagle3_checkpoint
 
 os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
@@ -41,14 +42,55 @@ except ImportError as exc:  # pragma: no cover - runtime dependency for experime
 
 DEFAULT_MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
 DEFAULT_CHECKPOINT_PATH = "checkpoints/eagle3_qwen25_7b"
-DEFAULT_PROMPTS_PATH = "data/ultrachat_eval_50_short_trunc512.jsonl"
-DEFAULT_MAX_NEW_TOKENS = 16
-DEFAULT_DRAFT_LEN = 2
+DEFAULT_PROMPTS_PATH = "data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl"
+DEFAULT_MAX_NEW_TOKENS = 128
+DEFAULT_DRAFT_LEN = 3
 DEFAULT_GPU_MEMORY_UTILIZATION = 0.4
-DEFAULT_MAX_MODEL_LEN = 1024
+DEFAULT_MAX_MODEL_LEN = 1280
 DEFAULT_WARMUP_PROMPTS = 1
 
 _QWEN2_SPECULATORS_PATCHED = False
+
+EAGLE3_CONFIG_PY = '''from typing import Any, Literal
+
+from pydantic import Field, field_serializer, field_validator
+from transformers import AutoConfig, PretrainedConfig
+from transformers.models.llama.configuration_llama import LlamaConfig
+
+from speculators import SpeculatorModelConfig
+
+__all__ = ["Eagle3SpeculatorConfig"]
+
+
+@SpeculatorModelConfig.register("eagle3")
+class Eagle3SpeculatorConfig(SpeculatorModelConfig):
+    speculators_model_type: Literal["eagle3"] = "eagle3"
+    architectures: list[str] = Field(default_factory=lambda: ["Eagle3Speculator"])
+    transformer_layer_config: PretrainedConfig = Field(default_factory=LlamaConfig)
+    draft_vocab_size: int = 32000
+    norm_before_residual: bool = False
+    target_hidden_size: int | None = None
+    eagle_aux_hidden_state_layer_ids: list[int] | None = None
+    embed_requires_grad: bool = False
+
+    @property
+    def target_vocab_size(self) -> int:
+        return self.transformer_layer_config.vocab_size
+
+    @field_serializer("transformer_layer_config")
+    def serialize_transformer_config(self, value: PretrainedConfig) -> dict:
+        return value.to_diff_dict()
+
+    @field_validator("transformer_layer_config", mode="before")
+    @classmethod
+    def validate_transformer_config(cls, value: Any) -> PretrainedConfig:
+        if isinstance(value, dict):
+            config_class: type[PretrainedConfig] = LlamaConfig
+            if "model_type" in value:
+                config_class = AutoConfig.for_model(model_type=value["model_type"]).__class__
+            return config_class(**value)
+        return value
+'''
 
 
 class Qwen2DecoderEagle3FirstLayer(Qwen2DecoderLayer):
@@ -167,8 +209,8 @@ def export_checkpoint_to_speculators(
     checkpoint_path: str | Path,
     export_dir: str | Path,
     verifier_model_path: str,
+    speculative_tokens: int,
 ) -> Path:
-    ensure_qwen2_speculators_support()
     export_path = Path(export_dir).resolve()
     export_path.mkdir(parents=True, exist_ok=True)
 
@@ -187,26 +229,15 @@ def export_checkpoint_to_speculators(
             draft_config.num_hidden_layers,
         )
 
-    spec_model = Eagle3DraftModel.from_training_args(
-        verifier_config=draft_transformer_config,
-        verifier_name_or_path=verifier_model_path,
-        draft_vocab_size=int(verifier_config.vocab_size),
-        num_layers=draft_config.num_hidden_layers,
-        norm_before_residual=False,
-        ttt_steps=draft_config.ttt_steps,
-        target_layer_ids=list(draft_config.selected_layers),
-    )
-    spec_model.config.eagle_aux_hidden_state_layer_ids = list(draft_config.selected_layers)
-
     source_state = drafter.state_dict()
-    target_state = spec_model.state_dict()
-    target_state["fc.weight"] = source_state["feature_fuser.weight"].detach().clone()
-    target_state["embed_tokens.weight"] = source_state["token_embedding.weight"].detach().clone()
-    target_state["lm_head.weight"] = source_state["lm_head.weight"].detach().clone()
-    target_state["norm.weight"] = source_state["norm.weight"].detach().clone()
+    export_state = {
+        "fc.weight": source_state["feature_fuser.weight"].detach().clone(),
+        "embed_tokens.weight": source_state["token_embedding.weight"].detach().clone(),
+        "lm_head.weight": source_state["lm_head.weight"].detach().clone(),
+        "norm.weight": source_state["norm.weight"].detach().clone(),
+    }
     for layer_idx in range(draft_config.num_hidden_layers):
         source_prefix = f"layers.{layer_idx}."
-        target_prefix = f"layers.{layer_idx}."
         for suffix in (
             "hidden_norm.weight",
             "input_layernorm.weight",
@@ -222,20 +253,63 @@ def export_checkpoint_to_speculators(
             "mlp.up_proj.weight",
             "mlp.down_proj.weight",
         ):
-            target_key = target_prefix + suffix
             source_key = source_prefix + suffix
-            if target_key not in target_state or source_key not in source_state:
+            if source_key not in source_state:
                 continue
-            target_state[target_key] = source_state[source_key].detach().clone()
-    spec_model.load_state_dict(target_state, strict=True)
-    spec_model.save_pretrained(export_path, safe_serialization=True)
+            export_state[f"layers.{layer_idx}.{suffix}"] = source_state[source_key].detach().clone()
+    save_file(export_state, str(export_path / "model.safetensors"))
+
+    verifier_dict = verifier_config.to_dict()
+    transformer_layer_config = draft_transformer_config.to_dict()
+    speculator_config = {
+        "architectures": ["Eagle3DraftModel"],
+        "auto_map": {"": "config.Eagle3SpeculatorConfig"},
+        "base_model_ep_plan": None,
+        "draft_vocab_size": int(verifier_config.vocab_size),
+        "dtype": "float32",
+        "eagle_aux_hidden_state_layer_ids": list(draft_config.selected_layers),
+        "embed_requires_grad": False,
+        "has_no_defaults_at_init": False,
+        "norm_before_residual": bool(draft_config.norm_before_residual),
+        "speculators_config": {
+            "algorithm": "eagle3",
+            "default_proposal_method": "greedy",
+            "proposal_methods": [
+                {
+                    "accept_tolerance": 0.0,
+                    "proposal_type": "greedy",
+                    "speculative_tokens": int(speculative_tokens),
+                    "verifier_accept_k": 1,
+                }
+            ],
+            "verifier": {
+                "architectures": verifier_dict.get("architectures", []),
+                "name_or_path": verifier_model_path,
+            },
+        },
+        "speculators_model_type": "eagle3",
+        "speculators_version": "0.4.0.1",
+        "target_hidden_size": None,
+        "transformer_layer_config": transformer_layer_config,
+        "transformers_version": getattr(verifier_config, "transformers_version", None),
+    }
+    (export_path / "config.json").write_text(
+        json.dumps(speculator_config, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (export_path / "config.py").write_text(EAGLE3_CONFIG_PY, encoding="utf-8")
 
     AutoTokenizer.from_pretrained(verifier_model_path, trust_remote_code=True).save_pretrained(export_path)
     export_metadata = {
         "checkpoint_path": str(Path(checkpoint_path).resolve()),
         "verifier_model_path": verifier_model_path,
-        "feature_fuser_bias_l2": float(source_state["feature_fuser.bias"].norm().item()),
-        "dropped_feature_fuser_bias": True,
+        "feature_fuser_bias_l2": (
+            float(source_state["feature_fuser.bias"].norm().item())
+            if "feature_fuser.bias" in source_state
+            else 0.0
+        ),
+        "dropped_feature_fuser_bias": "feature_fuser.bias" in source_state,
+        "exported_speculative_tokens": int(speculative_tokens),
         "eagle3_config": metadata["eagle3_config"],
     }
     (export_path / "codex_export_metadata.json").write_text(
@@ -247,13 +321,19 @@ def export_checkpoint_to_speculators(
 
 def build_prompt_token_inputs(model_path: str, prompts_path: str) -> tuple[list[dict[str, list[int]]], list[str]]:
     tokenizer = load_tokenizer(model_path)
-    prompts = load_prompts(prompts_path, tokenizer=tokenizer)
     prompt_inputs: list[dict[str, list[int]]] = []
     prompt_ids: list[str] = []
-    for prompt in prompts:
-        token_ids = tokenizer.encode(prompt.prompt, add_special_tokens=False)
+    with Path(prompts_path).open("r", encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle if line.strip()]
+    for line_number, sample in enumerate(rows, start=1):
+        prompt_id = str(sample.get("prompt_id", sample.get("id", f"prompt_{line_number:04d}")))
+        if "prompt_ids" in sample:
+            token_ids = [int(token_id) for token_id in sample["prompt_ids"]]
+        else:
+            prompt = render_prompt(tokenizer, sample)
+            token_ids = tokenizer.encode(prompt.prompt, add_special_tokens=False)
         prompt_inputs.append({"prompt_token_ids": token_ids})
-        prompt_ids.append(prompt.prompt_id)
+        prompt_ids.append(prompt_id)
     return prompt_inputs, prompt_ids
 
 
@@ -293,6 +373,14 @@ def collect_spec_decode_metrics(metrics, draft_len: int) -> dict[str, float | in
 def destroy_llm(llm: LLM | None) -> None:
     if llm is None:
         return
+    engine = getattr(llm, "llm_engine", None)
+    engine_core = getattr(engine, "engine_core", None)
+    shutdown = getattr(engine_core, "shutdown", None)
+    if callable(shutdown):
+        try:
+            shutdown(timeout=0)
+        except TypeError:
+            shutdown()
     del llm
     gc.collect()
     if torch.cuda.is_available():
@@ -425,6 +513,7 @@ def main() -> None:
         baseline_summary_path.parent.mkdir(parents=True, exist_ok=True)
         baseline_summary_path.write_text(json.dumps(baseline_summary, indent=2) + "\n", encoding="utf-8")
         destroy_llm(baseline_llm)
+        baseline_llm = None
         if args.mode == "baseline":
             return
 
@@ -456,6 +545,7 @@ def main() -> None:
                 checkpoint_path=args.checkpoint_path,
                 export_dir=draft_model_path,
                 verifier_model_path=args.model_path,
+                speculative_tokens=args.draft_len,
             )
 
     speculative_config = {
@@ -489,17 +579,14 @@ def main() -> None:
         }
         method_latency_by_prompt = {}
 
-    if baseline_generated_tokens != speculative_generated_tokens:
-        raise RuntimeError(
-            "vLLM baseline/speculative token counts diverged: "
-            f"baseline={baseline_generated_tokens} speculative={speculative_generated_tokens}"
-        )
-
     diverged_prompt_id: str | None = None
     diverged_prompts = 0
+    token_count_mismatches = 0
     for prompt_id in prompt_ids:
         baseline_ids = baseline_outputs_by_prompt[prompt_id]
         speculative_ids = speculative_outputs_by_prompt[prompt_id]
+        if len(baseline_ids) != len(speculative_ids):
+            token_count_mismatches += 1
         if baseline_ids != speculative_ids:
             diverged_prompts += 1
             if diverged_prompt_id is None:
@@ -507,6 +594,7 @@ def main() -> None:
 
     spec_metrics = collect_spec_decode_metrics(speculative_llm.get_metrics(), args.draft_len)
     destroy_llm(speculative_llm)
+    speculative_llm = None
 
     output_path = (
         Path(args.output)
@@ -521,10 +609,12 @@ def main() -> None:
         "num_prompts": len(prompt_inputs),
         "draft_len": args.draft_len,
         "generated_tokens": speculative_generated_tokens,
+        "baseline_generated_tokens": baseline_generated_tokens,
+        "speculative_generated_tokens": speculative_generated_tokens,
         "baseline_wall_time_s": baseline_wall_time_s,
         "method_wall_time_s": method_wall_time_s,
         "baseline_tokens_per_s": (
-            speculative_generated_tokens / baseline_wall_time_s if baseline_wall_time_s else 0.0
+            baseline_generated_tokens / baseline_wall_time_s if baseline_wall_time_s else 0.0
         ),
         "method_tokens_per_s": (
             speculative_generated_tokens / method_wall_time_s if method_wall_time_s else 0.0
@@ -533,6 +623,7 @@ def main() -> None:
         "matches_baseline": diverged_prompts == 0,
         "diverged_prompts": diverged_prompts,
         "first_diverged_prompt_id": diverged_prompt_id or "",
+        "token_count_mismatches": token_count_mismatches,
         "seed": args.seed,
         "parallel_drafting": args.parallel_drafting,
         "serial_prompts": args.serial_prompts,

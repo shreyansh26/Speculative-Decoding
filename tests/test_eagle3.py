@@ -4,7 +4,12 @@ import torch
 
 from common.sampling import autoregressive_generate
 from methods.eagle3.inference.infer import run_eagle3_speculative_decode
-from methods.eagle3.training.train import Eagle3Config, Eagle3Drafter, fuse_hidden_states, run_drafter_training_step
+from methods.eagle3.training.train import (
+    Eagle3Config,
+    Eagle3Drafter,
+    fuse_hidden_states,
+    run_drafter_training_step,
+)
 
 
 class ToyEagleOutput:
@@ -77,7 +82,6 @@ def test_greedy_output_equals_baseline() -> None:
     )
     drafter = Eagle3Drafter(config)
     drafter.feature_fuser.weight.data.zero_()
-    drafter.feature_fuser.bias.data.zero_()
     for layer in drafter.layers:
         layer.self_attn.q_proj.weight.data.zero_()
         layer.self_attn.q_proj.bias.data.zero_()
