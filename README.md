@@ -36,6 +36,8 @@ Current reference artifact:
 - eval setup: `100` train-overlap prompts, `max_new_tokens=128`
 - best inference draft length: `2`
 
+`draft_len=2` is the inference setting: each EAGLE-3 speculation step uses one target/base seed token plus up to two EAGLE-proposed speculative tokens, so a fully accepted step can emit up to three tokens. The checkpoint suffix `len3` refers to the training rollout/checkpoint configuration, not the best inference draft length.
+
 Latest local implementation benchmark results on GPU 4:
 
 | Path | Baseline wall time | EAGLE wall time | Baseline mean latency | EAGLE mean latency | Baseline throughput | EAGLE throughput | Speedup | Acceptance |
