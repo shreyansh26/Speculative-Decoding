@@ -1,0 +1,13 @@
+{
+  "num_records": 100.0,
+  "mean_speedup": 1.2760368857773736,
+  "mean_acceptance_rate": 0.37708990529654707,
+  "mean_method_tokens_per_s": 78.65303162058223,
+  "mean_baseline_tokens_per_s": 61.67482402547849,
+  "method": "eagle3",
+  "num_prompts": 100,
+  "output": "runs/eagle3_eval100_ce_len2_nonvllm.jsonl",
+  "matches_baseline": false,
+  "diverged_prompts": 56,
+  "first_diverged_prompt_id": "f9e4f4f68b0b6db08904192a42cd02783cf6fb50316d69c97ba2cde22a28afcf"
+}

@@ -1,0 +1,32 @@
+{
+  "method": "eagle3_vllm",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "draft_model": "/mnt/ssd1/shreyansh/home_dir/speculative_decoding/checkpoints/vllm_exports/eagle3_modelopt_eval100_len2",
+  "num_prompts": 100,
+  "draft_len": 2,
+  "generated_tokens": 12100,
+  "baseline_generated_tokens": 12123,
+  "speculative_generated_tokens": 12100,
+  "baseline_wall_time_s": 6.6178857699997025,
+  "method_wall_time_s": 5.588100147011573,
+  "baseline_tokens_per_s": 1831.8539215282565,
+  "method_tokens_per_s": 2165.315524359542,
+  "speedup": 1.1842818839849967,
+  "matches_baseline": false,
+  "diverged_prompts": 43,
+  "first_diverged_prompt_id": "1730858474ab29d5cb68548742e454fd98f73ff42cbcf86752732be727d4d0eb",
+  "token_count_mismatches": 5,
+  "seed": 0,
+  "parallel_drafting": false,
+  "serial_prompts": false,
+  "warmup_prompts": 0,
+  "speculation_steps": 6481,
+  "proposed_draft_tokens": 12962,
+  "accepted_draft_tokens": 5574,
+  "acceptance_rate": 0.4300262305199815,
+  "mean_accepted_tokens_per_step": 0.860052461039963,
+  "acceptance_rate_by_position": [
+    0.5506866224348095,
+    0.30936583860515354
+  ]
+}

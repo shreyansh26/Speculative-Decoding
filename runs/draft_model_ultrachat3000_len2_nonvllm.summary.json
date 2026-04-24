@@ -1,0 +1,14 @@
+{
+  "num_records": 100.0,
+  "mean_speedup": 0.5520550496077492,
+  "mean_acceptance_rate": 0.8179226951098564,
+  "mean_method_tokens_per_s": 33.23491537201842,
+  "mean_baseline_tokens_per_s": 60.22166399914233,
+  "method": "draft_model",
+  "num_prompts": 100,
+  "output": "runs/draft_model_ultrachat3000_len2_nonvllm.jsonl",
+  "matches_baseline": false,
+  "diverged_prompts": 53,
+  "first_diverged_prompt_id": "f9e4f4f68b0b6db08904192a42cd02783cf6fb50316d69c97ba2cde22a28afcf",
+  "token_count_mismatches": 4
+}

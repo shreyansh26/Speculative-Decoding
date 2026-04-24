@@ -1,0 +1,15 @@
+{
+  "num_records": 20.0,
+  "mean_speedup": 1.209178160377119,
+  "mean_acceptance_rate": 0.6005719569723009,
+  "mean_method_tokens_per_s": 70.68644549948736,
+  "mean_baseline_tokens_per_s": 58.51130404448372,
+  "method": "parallel_draft_models",
+  "num_prompts": 20,
+  "output": "runs/parallel_draft_models_len2_nonvllm_20.jsonl",
+  "matches_baseline": false,
+  "diverged_prompts": 18,
+  "first_diverged_prompt_id": "f9e4f4f68b0b6db08904192a42cd02783cf6fb50316d69c97ba2cde22a28afcf",
+  "token_count_mismatches": 2,
+  "pard_token_id": 151665
+}
