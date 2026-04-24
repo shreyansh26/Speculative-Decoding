@@ -71,40 +71,16 @@ Benchmark files:
 
 Output divergence from the baseline is diagnostic only for EAGLE-3 runs. The benchmark records `matches_baseline`, diverged prompt counts, and token-count mismatches, but speedup is computed from the measured wall time and generated-token throughput.
 
-## Training-Free Wiki Extract Benchmarks
+## Training-Free Wiki Extract Dataset
 
 Current reference artifacts:
 
 - target model: `Qwen/Qwen2.5-7B-Instruct`
 - eval set: `data/wiki_extract_ngram_eval100_qwen25_7b.jsonl`
 - eval setup: first `50` prompts, `max_new_tokens=128`, `bf16`
-- n-gram settings: `draft_len=5`, prompt lookup `3..8`
-- suffix-decoding settings: `draft_len=8`, `max_tree_depth=8`, `max_spec_factor=1.0`
 - vLLM setup: baseline and speculative engines both use `--gpu-memory-utilization 0.85`
 
-Output divergence from the baseline is allowed for these rows. The benchmark artifacts still record exact divergence counts and token-count mismatches.
-
-| Method | Path | Baseline wall time | Method wall time | Baseline mean latency | Method mean latency | Baseline throughput | Method throughput | Speedup | Decode speedup | Acceptance |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| n-gram | non-vLLM PyTorch loop | `120.4061s` | `58.1024s` | `2.4081s` | `1.1620s` | `32.16 tok/s` | `66.64 tok/s` | `2.0723x` | `3.2221x` | `84.37%` |
-| suffix decoding | non-vLLM PyTorch loop | `120.6764s` | `83.0907s` | `2.4135s` | `1.6618s` | `31.90 tok/s` | `46.32 tok/s` | `1.4523x` | `1.8277x` | `59.20%` |
-| n-gram | vLLM batched throughput (`max_num_seqs=16`) | `12.0867s` | `10.9570s` | n/a | n/a | `305.54 tok/s` | `336.86 tok/s` | `1.1031x` | `1.1611x` | `47.67%` |
-| n-gram | vLLM serial latency (`max_num_seqs=1`) | `33.0454s` | `17.5306s` | `0.6609s` | `0.3506s` | `114.54 tok/s` | `213.23 tok/s` | `1.8850x` | `2.9128x` | `83.73%` |
-| suffix decoding | vLLM batched throughput (`max_num_seqs=16`) | `11.9448s` | `10.7483s` | n/a | n/a | `309.17 tok/s` | `338.10 tok/s` | `1.1113x` | `1.1030x` | `81.27%` |
-| suffix decoding | vLLM serial latency (`max_num_seqs=1`) | `32.8949s` | `17.9576s` | `0.6579s` | `0.3592s` | `115.06 tok/s` | `209.77 tok/s` | `1.8318x` | `2.8594x` | `81.07%` |
-
-The non-vLLM table uses aggregate wall-time speedups from the per-prompt JSONL records. The emitted summary files also include mean per-prompt speedups: n-gram `2.1818x`, suffix decoding `1.4424x`. For vLLM n-gram, the batched row uses `ngram_gpu`; the serial row uses `ngram` because vLLM `0.19.1` fails to initialize `ngram_gpu` at batch size `1`.
-
-Benchmark files:
-
-- n-gram non-vLLM: `runs/ngram_wiki50_nonvllm_bf16.jsonl`
-- suffix decoding non-vLLM: `runs/suffix_wiki50_nonvllm_bf16.jsonl`
-- n-gram vLLM batched: `runs/ngram_wiki50_vllm_batched.summary.json`
-- n-gram vLLM serial: `runs/ngram_wiki50_vllm_serial.summary.json`
-- suffix decoding vLLM batched: `runs/suffix_wiki50_vllm_batched.summary.json`
-- suffix decoding vLLM serial: `runs/suffix_wiki50_vllm_serial.summary.json`
-
-### Training-Free Wiki Commands
+The Wikipedia corpus is embedded in each request: dataset prep writes the full article into `prompt` and `prompt_ids`, so both methods build draft context from that request's prompt tokens plus accepted generation history. The final runs do not use a shared external corpus index; the non-vLLM suffix script has optional `--global-cache`, but it was not used here.
 
 Prepare the extractive Wikipedia eval set:
 
@@ -116,6 +92,33 @@ python data/prepare_ngram_wiki.py \
   --num-questions 100 \
   --prompt-token-budget 14336
 ```
+
+## N-gram Wiki Extract Benchmarks
+
+Reference settings:
+
+- target model: `Qwen/Qwen2.5-7B-Instruct`
+- eval setup: first `50` prompts, `max_new_tokens=128`, `bf16`
+- n-gram settings: `draft_len=5`, prompt lookup `3..8`
+- vLLM setup: baseline and speculative engines both use `--gpu-memory-utilization 0.85`
+
+Output divergence from the baseline is allowed for these rows. The benchmark artifacts still record exact divergence counts and token-count mismatches.
+
+| Path | Baseline wall time | N-gram wall time | Baseline mean latency | N-gram mean latency | Baseline throughput | N-gram throughput | Speedup | Decode speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| non-vLLM PyTorch loop | `120.4061s` | `58.1024s` | `2.4081s` | `1.1620s` | `32.16 tok/s` | `66.64 tok/s` | `2.0723x` | `3.2221x` | `84.37%` |
+| vLLM batched throughput (`max_num_seqs=16`) | `12.0867s` | `10.9570s` | n/a | n/a | `305.54 tok/s` | `336.86 tok/s` | `1.1031x` | `1.1611x` | `47.67%` |
+| vLLM serial latency (`max_num_seqs=1`) | `33.0454s` | `17.5306s` | `0.6609s` | `0.3506s` | `114.54 tok/s` | `213.23 tok/s` | `1.8850x` | `2.9128x` | `83.73%` |
+
+The non-vLLM table row uses aggregate wall-time speedup from per-prompt JSONL records. The emitted summary file also reports mean per-prompt speedup `2.1818x`. For vLLM, the batched row uses `ngram_gpu`; the serial row uses `ngram` because vLLM `0.19.1` fails to initialize `ngram_gpu` at batch size `1`.
+
+Benchmark files:
+
+- non-vLLM: `runs/ngram_wiki50_nonvllm_bf16.jsonl`, `runs/ngram_wiki50_nonvllm_bf16.summary.json`
+- vLLM batched: `runs/ngram_wiki50_vllm_batched.baseline.json`, `runs/ngram_wiki50_vllm_batched.summary.json`
+- vLLM serial: `runs/ngram_wiki50_vllm_serial.baseline.json`, `runs/ngram_wiki50_vllm_serial.summary.json`
+
+### N-gram Commands
 
 Run n-gram non-vLLM PyTorch inference:
 
@@ -131,27 +134,6 @@ python methods/ngram/inference/infer.py \
   --draft-len 5 \
   --prompt-lookup-min 3 \
   --prompt-lookup-max 8 \
-  --max-model-len 16384 \
-  --dtype bf16 \
-  --device cuda \
-  --warmup-prompts 1
-```
-
-Run suffix-decoding non-vLLM PyTorch inference:
-
-```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/suffix_decoding/inference/infer.py \
-  --model-path Qwen/Qwen2.5-7B-Instruct \
-  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
-  --output runs/suffix_wiki50_nonvllm_bf16.jsonl \
-  --limit-prompts 50 \
-  --max-new-tokens 128 \
-  --draft-len 8 \
-  --max-tree-depth 8 \
-  --max-spec-factor 1.0 \
-  --min-token-prob 0.0 \
   --max-model-len 16384 \
   --dtype bf16 \
   --device cuda \
@@ -205,6 +187,54 @@ python methods/ngram/inference/infer_vllm.py \
   --serial-prompts \
   --warmup-prompts 1 \
   --seed 0
+```
+
+## Suffix-Decoding Wiki Extract Benchmarks
+
+Reference settings:
+
+- target model: `Qwen/Qwen2.5-7B-Instruct`
+- eval setup: first `50` prompts, `max_new_tokens=128`, `bf16`
+- suffix-decoding settings: `draft_len=8`, `max_tree_depth=8`, `max_spec_factor=1.0`, `min_token_prob=0.0`
+- vLLM setup: baseline and speculative engines both use `--gpu-memory-utilization 0.85`
+
+Output divergence from the baseline is allowed for these rows. The benchmark artifacts still record exact divergence counts and token-count mismatches.
+
+| Path | Baseline wall time | Suffix wall time | Baseline mean latency | Suffix mean latency | Baseline throughput | Suffix throughput | Speedup | Decode speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| non-vLLM PyTorch loop | `120.6764s` | `83.0907s` | `2.4135s` | `1.6618s` | `31.90 tok/s` | `46.32 tok/s` | `1.4523x` | `1.8277x` | `59.20%` |
+| vLLM batched throughput (`max_num_seqs=16`) | `11.9448s` | `10.7483s` | n/a | n/a | `309.17 tok/s` | `338.10 tok/s` | `1.1113x` | `1.1030x` | `81.27%` |
+| vLLM serial latency (`max_num_seqs=1`) | `32.8949s` | `17.9576s` | `0.6579s` | `0.3592s` | `115.06 tok/s` | `209.77 tok/s` | `1.8318x` | `2.8594x` | `81.07%` |
+
+The non-vLLM table row uses aggregate wall-time speedup from per-prompt JSONL records. The emitted summary file also reports mean per-prompt speedup `1.4424x`. The vLLM suffix path requires `arctic-inference==0.1.1` in the environment.
+
+Benchmark files:
+
+- non-vLLM: `runs/suffix_wiki50_nonvllm_bf16.jsonl`, `runs/suffix_wiki50_nonvllm_bf16.summary.json`
+- vLLM batched: `runs/suffix_wiki50_vllm_batched.baseline.json`, `runs/suffix_wiki50_vllm_batched.summary.json`
+- vLLM serial: `runs/suffix_wiki50_vllm_serial.baseline.json`, `runs/suffix_wiki50_vllm_serial.summary.json`
+
+### Suffix-Decoding Commands
+
+Run suffix-decoding non-vLLM PyTorch inference:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+. .venv/bin/activate
+python methods/suffix_decoding/inference/infer.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
+  --output runs/suffix_wiki50_nonvllm_bf16.jsonl \
+  --limit-prompts 50 \
+  --max-new-tokens 128 \
+  --draft-len 8 \
+  --max-tree-depth 8 \
+  --max-spec-factor 1.0 \
+  --min-token-prob 0.0 \
+  --max-model-len 16384 \
+  --dtype bf16 \
+  --device cuda \
+  --warmup-prompts 1
 ```
 
 Run suffix-decoding vLLM batched throughput inference. The vLLM suffix path requires `arctic-inference==0.1.1` in the environment.
