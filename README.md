@@ -289,6 +289,181 @@ python methods/eagle3/modelopt_experiment.py \
   --baseline-summary-path runs/eagle3_modelopt_eval100_len2_vllm_serial.baseline.json
 ```
 
+## Parallel Draft Model (PARD)
+
+Current reference artifact:
+
+- checkpoint: `checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000`
+- target model: `Qwen/Qwen2.5-7B-Instruct`
+- draft base: `Qwen/Qwen2.5-0.5B-Instruct`
+- full distillation set: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl`
+- reference eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
+- eval setup: `100` train-overlap prompts, `max_new_tokens=128`
+- best measured non-vLLM inference draft length: `5`
+- best measured vLLM inference draft length: `3`
+
+The PARD checkpoint is a standard Hugging Face Qwen2 draft-model directory that vLLM can load directly with `parallel_drafting=True`. It exports the target tokenizer vocabulary size (`152064`), `pard_token=151665`, and `spd_type=pard`.
+
+The checkpoint was trained from `Qwen/Qwen2.5-0.5B-Instruct` on the 3000-row UltraChat/Qwen2.5-7B completion set with the PARD `draft_len=8` objective. Final teacher-forced eval proxy on the 100-row train-overlap eval file:
+
+- first-token match: `92.70%`
+- length-8 acceptance proxy: `31.82%`
+- mean accepted tokens per PARD step proxy: `2.5375`
+
+Latest PARD benchmark results on GPU 4. All vLLM rows use fixed `gpu_memory_utilization=0.85` for both the baseline engine and the speculative engine.
+
+| Path | Inference draft length | Baseline wall time | PARD wall time | Baseline mean latency | PARD mean latency | Baseline throughput | PARD throughput | Speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| vLLM batched throughput (`max_num_seqs=16`) | `3` | `6.6162s` | `5.0411s` | n/a | n/a | `1832.33 tok/s` | `2403.04 tok/s` | `1.3124x` | `60.96%` |
+| vLLM serial latency (`max_num_seqs=1`) | `3` | `74.3739s` | `40.6290s` | `0.7437s` | `0.4063s` | `162.77 tok/s` | `298.51 tok/s` | `1.8306x` | `60.22%` |
+| non-vLLM PyTorch loop | `5` | `214.5692s` | `155.2519s` | `2.1457s` | `1.5525s` | `56.19 tok/s` | `77.66 tok/s` | `1.3821x` | `30.96%` |
+
+The non-vLLM summary JSON reports per-prompt means of `1.4424x` speedup, `80.99 tok/s` PARD throughput, and `33.39%` acceptance. The table above uses aggregate wall-clock timing across all 100 prompts for consistency with the vLLM rows.
+
+vLLM batched sweep on the same baseline:
+
+| Inference draft length | Speedup | PARD throughput | Acceptance |
+| ---: | ---: | ---: | ---: |
+| `2` | `1.2672x` | `2321.55 tok/s` | `74.77%` |
+| `3` | `1.3124x` | `2403.04 tok/s` | `60.96%` |
+| `4` | `1.3004x` | `2381.77 tok/s` | `50.50%` |
+| `5` | `1.2156x` | `2225.08 tok/s` | `41.40%` |
+
+Non-vLLM 20-prompt screening sweep:
+
+| Inference draft length | Speedup | PARD throughput | Acceptance |
+| ---: | ---: | ---: | ---: |
+| `2` | `1.2092x` | `70.69 tok/s` | `60.06%` |
+| `3` | `1.3220x` | `73.25 tok/s` | `47.28%` |
+| `4` | `1.3895x` | `79.43 tok/s` | `38.42%` |
+| `5` | `1.4062x` | `80.81 tok/s` | `32.58%` |
+| `6` | `1.3806x` | `80.15 tok/s` | `26.71%` |
+
+Benchmark files:
+
+- non-vLLM full: `runs/parallel_draft_models_len5_nonvllm.jsonl`, `runs/parallel_draft_models_len5_nonvllm.summary.json`
+- vLLM batched baseline: `runs/parallel_draft_models_vllm_batched.baseline.json`
+- vLLM batched best: `runs/parallel_draft_models_len3_vllm_batched.summary.json`
+- vLLM serial baseline: `runs/parallel_draft_models_vllm_serial.baseline.json`
+- vLLM serial best: `runs/parallel_draft_models_len3_vllm_serial.summary.json`
+- vLLM batched sweep: `runs/parallel_draft_models_len2_vllm_batched.summary.json`, `runs/parallel_draft_models_len4_vllm_batched.summary.json`, `runs/parallel_draft_models_len5_vllm_batched.summary.json`
+- non-vLLM screening sweep: `runs/parallel_draft_models_len2_nonvllm_20.summary.json` through `runs/parallel_draft_models_len6_nonvllm_20.summary.json`
+
+Output divergence from the baseline is diagnostic only for PARD runs. The benchmark records `matches_baseline`, diverged prompt counts, and token-count mismatches, but speedup is computed from measured wall time and generated-token throughput.
+
+### PARD Commands
+
+Train the current reference checkpoint:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+. .venv/bin/activate
+python methods/parallel_draft_models/training/train.py \
+  --target-model-path Qwen/Qwen2.5-7B-Instruct \
+  --draft-base-model-path Qwen/Qwen2.5-0.5B-Instruct \
+  --data data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl \
+  --eval-data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000 \
+  --steps 1500 \
+  --batch-size 8 \
+  --grad-accum 1 \
+  --seq-len 512 \
+  --draft-len 8 \
+  --lr 3e-5 \
+  --cod-ratio 0.7 \
+  --cod-min-ratio 0.2 \
+  --eval-limit 100 \
+  --log-interval 25 \
+  --eval-interval 250 \
+  --dtype bf16 \
+  --device cuda \
+  --gradient-checkpointing
+```
+
+Run non-vLLM PyTorch inference with the measured best setting:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+. .venv/bin/activate
+python methods/parallel_draft_models/inference/infer.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --checkpoint-path checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/parallel_draft_models_len5_nonvllm.jsonl \
+  --max-new-tokens 128 \
+  --draft-len 5 \
+  --dtype bf16 \
+  --device cuda \
+  --warmup-prompts 1
+```
+
+Run vLLM batched throughput inference with the measured best setting. `infer_vllm.py` intentionally fixes `gpu_memory_utilization=0.85` for both baseline and speculative engines.
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+. .venv/bin/activate
+python methods/parallel_draft_models/inference/infer_vllm.py \
+  --mode both \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --checkpoint-path checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/parallel_draft_models_len3_vllm_batched.summary.json \
+  --baseline-summary-path runs/parallel_draft_models_vllm_batched.baseline.json \
+  --max-new-tokens 128 \
+  --draft-len 3 \
+  --dtype bf16 \
+  --max-model-len 1280 \
+  --max-num-seqs 16 \
+  --seed 0
+```
+
+Run vLLM serial latency inference:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+. .venv/bin/activate
+python methods/parallel_draft_models/inference/infer_vllm.py \
+  --mode both \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --checkpoint-path checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/parallel_draft_models_len3_vllm_serial.summary.json \
+  --baseline-summary-path runs/parallel_draft_models_vllm_serial.baseline.json \
+  --max-new-tokens 128 \
+  --draft-len 3 \
+  --dtype bf16 \
+  --max-model-len 1280 \
+  --max-num-seqs 1 \
+  --serial-prompts \
+  --warmup-prompts 1 \
+  --seed 0
+```
+
+Run only a speculative vLLM candidate against an existing baseline summary:
+
+```bash
+export CUDA_VISIBLE_DEVICES=4
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+. .venv/bin/activate
+python methods/parallel_draft_models/inference/infer_vllm.py \
+  --mode speculative \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --checkpoint-path checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --baseline-summary-path runs/parallel_draft_models_vllm_batched.baseline.json \
+  --output runs/parallel_draft_models_len4_vllm_batched.summary.json \
+  --max-new-tokens 128 \
+  --draft-len 4 \
+  --dtype bf16 \
+  --max-model-len 1280 \
+  --max-num-seqs 16 \
+  --seed 0
+```
+
 ## Draft Model
 
 Current reference artifact:
