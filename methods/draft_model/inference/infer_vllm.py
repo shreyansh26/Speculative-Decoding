@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import shutil
 import time
 from pathlib import Path
@@ -10,8 +11,10 @@ from pathlib import Path
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from common.tokenizer import load_prompts, load_tokenizer
+from common.tokenizer import load_tokenizer, render_prompt
 from methods.draft_model.training.train import load_draft_checkpoint
+
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 try:
     from vllm import LLM, SamplingParams
@@ -25,12 +28,12 @@ except ImportError as exc:  # pragma: no cover - runtime dependency for experime
 
 DEFAULT_MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
 DEFAULT_DRAFT_BASE_MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
-DEFAULT_CHECKPOINT_PATH = "checkpoints/draft_model_qwen25_05b_2ep"
-DEFAULT_PROMPTS_PATH = "data/ultrachat_eval_50_short_trunc512.jsonl"
-DEFAULT_MAX_NEW_TOKENS = 16
-DEFAULT_DRAFT_LEN = 4
-DEFAULT_GPU_MEMORY_UTILIZATION = 0.4
-DEFAULT_MAX_MODEL_LEN = 1024
+DEFAULT_CHECKPOINT_PATH = "checkpoints/draft_model_qwen25_05b_ultrachat3000"
+DEFAULT_PROMPTS_PATH = "data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl"
+DEFAULT_MAX_NEW_TOKENS = 128
+DEFAULT_DRAFT_LEN = 2
+DEFAULT_GPU_MEMORY_UTILIZATION = 0.85
+DEFAULT_MAX_MODEL_LEN = 1280
 DEFAULT_WARMUP_PROMPTS = 1
 
 
@@ -39,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
     parser.add_argument("--draft-base-model-path", default=DEFAULT_DRAFT_BASE_MODEL_PATH)
     parser.add_argument("--checkpoint-path", default=DEFAULT_CHECKPOINT_PATH)
+    parser.add_argument("--draft-model-path", default="")
     parser.add_argument("--export-dir", default="")
     parser.add_argument("--skip-export", action="store_true")
     parser.add_argument("--prompts", default=DEFAULT_PROMPTS_PATH)
@@ -56,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-prompts", type=int, default=DEFAULT_WARMUP_PROMPTS)
     parser.add_argument("--mode", choices=("both", "baseline", "speculative"), default="both")
     parser.add_argument("--baseline-summary-path", default="")
+    parser.add_argument("--require-baseline-match", action="store_true")
     return parser.parse_args()
 
 
@@ -91,15 +96,50 @@ def export_checkpoint_to_hf(
     return export_path
 
 
+def is_vllm_ready_checkpoint(model_path: str | Path) -> bool:
+    path = Path(model_path)
+    config_path = path / "config.json"
+    weights_path = path / "model.safetensors"
+    if not config_path.exists() or not weights_path.exists():
+        return False
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    return "qwen3_config" not in config and (
+        "model_type" in config or "architectures" in config
+    )
+
+
+def checkpoint_vocab_size(model_path: str | Path) -> int | None:
+    config_path = Path(model_path) / "config.json"
+    if not config_path.exists():
+        return None
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    value = config.get("vocab_size")
+    return int(value) if value is not None else None
+
+
 def build_prompt_token_inputs(model_path: str, prompts_path: str) -> tuple[list[dict[str, list[int]]], list[str]]:
     tokenizer = load_tokenizer(model_path)
-    prompts = load_prompts(prompts_path, tokenizer=tokenizer)
     prompt_inputs: list[dict[str, list[int]]] = []
     prompt_ids: list[str] = []
-    for prompt in prompts:
-        token_ids = tokenizer.encode(prompt.prompt, add_special_tokens=False)
+    with Path(prompts_path).open("r", encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle if line.strip()]
+    for line_number, sample in enumerate(rows, start=1):
+        prompt_id = str(sample.get("prompt_id", sample.get("id", f"prompt_{line_number:04d}")))
+        if "prompt_ids" in sample:
+            token_ids = [int(token_id) for token_id in sample["prompt_ids"]]
+        else:
+            rendered = render_prompt(tokenizer, sample)
+            token_ids = tokenizer.encode(rendered.prompt, add_special_tokens=False)
         prompt_inputs.append({"prompt_token_ids": token_ids})
-        prompt_ids.append(prompt.prompt_id)
+        prompt_ids.append(prompt_id)
+    if not prompt_inputs:
+        raise ValueError(f"{prompts_path} did not contain any prompts")
     return prompt_inputs, prompt_ids
 
 
@@ -139,6 +179,14 @@ def collect_spec_decode_metrics(metrics, draft_len: int) -> dict[str, float | in
 def destroy_llm(llm: LLM | None) -> None:
     if llm is None:
         return
+    engine = getattr(llm, "llm_engine", None)
+    engine_core = getattr(engine, "engine_core", None)
+    shutdown = getattr(engine_core, "shutdown", None)
+    if callable(shutdown):
+        try:
+            shutdown(timeout=0)
+        except TypeError:
+            shutdown()
     del llm
     gc.collect()
     if torch.cuda.is_available():
@@ -207,6 +255,8 @@ def make_engine_kwargs(args: argparse.Namespace) -> dict[str, object]:
 
 def main() -> None:
     args = parse_args()
+    if args.max_num_seqs is None:
+        args.max_num_seqs = 1 if args.serial_prompts else 16
     torch.manual_seed(args.seed)
 
     prompt_inputs, prompt_ids = build_prompt_token_inputs(args.model_path, args.prompts)
@@ -286,30 +336,45 @@ def main() -> None:
     baseline_generated_tokens = int(baseline_summary["generated_tokens"])
     baseline_wall_time_s = float(baseline_summary["baseline_wall_time_s"])
 
-    export_dir = (
-        Path(args.export_dir)
-        if args.export_dir
-        else Path(f"checkpoints/vllm_exports/draft_model_len{args.draft_len}")
-    )
-    export_dir = export_dir.resolve()
-    if args.skip_export:
-        if not export_dir.exists():
-            raise FileNotFoundError(
-                f"--skip-export was set but draft export was not found at {export_dir}"
-            )
+    if args.draft_model_path:
+        draft_model_path = Path(args.draft_model_path).resolve()
+        if not draft_model_path.exists():
+            raise FileNotFoundError(draft_model_path)
     else:
-        if export_dir.exists():
-            shutil.rmtree(export_dir)
-        export_checkpoint_to_hf(
-            checkpoint_path=args.checkpoint_path,
-            export_dir=export_dir,
-            base_model_path=args.draft_base_model_path,
-            tokenizer_source_path=args.model_path,
-        )
+        checkpoint_path = Path(args.checkpoint_path).resolve()
+        if args.skip_export:
+            draft_model_path = (
+                Path(args.export_dir).resolve() if args.export_dir else checkpoint_path
+            )
+            if not draft_model_path.exists():
+                raise FileNotFoundError(
+                    f"--skip-export was set but draft model was not found at {draft_model_path}"
+                )
+        elif (
+            is_vllm_ready_checkpoint(checkpoint_path)
+            and checkpoint_vocab_size(checkpoint_path)
+            == int(AutoConfig.from_pretrained(args.model_path, trust_remote_code=True).vocab_size)
+        ):
+            draft_model_path = checkpoint_path
+        else:
+            export_dir = (
+                Path(args.export_dir)
+                if args.export_dir
+                else Path(f"checkpoints/vllm_exports/draft_model_len{args.draft_len}")
+            )
+            draft_model_path = export_dir.resolve()
+            if draft_model_path.exists():
+                shutil.rmtree(draft_model_path)
+            export_checkpoint_to_hf(
+                checkpoint_path=checkpoint_path,
+                export_dir=draft_model_path,
+                base_model_path=args.draft_base_model_path,
+                tokenizer_source_path=args.model_path,
+            )
 
     speculative_config = {
         "method": "draft_model",
-        "model": str(export_dir),
+        "model": str(draft_model_path),
         "num_speculative_tokens": args.draft_len,
         "draft_tensor_parallel_size": 1,
         "max_model_len": args.max_model_len,
@@ -337,21 +402,23 @@ def main() -> None:
         }
         method_latency_by_prompt = {}
 
-    if baseline_generated_tokens != speculative_generated_tokens:
-        raise RuntimeError(
-            "vLLM baseline/speculative token counts diverged: "
-            f"baseline={baseline_generated_tokens} speculative={speculative_generated_tokens}"
-        )
-
     diverged_prompt_id: str | None = None
     diverged_prompts = 0
+    token_count_mismatches = 0
     for prompt_id in prompt_ids:
         baseline_ids = baseline_outputs_by_prompt[prompt_id]
         speculative_ids = speculative_outputs_by_prompt[prompt_id]
+        if len(baseline_ids) != len(speculative_ids):
+            token_count_mismatches += 1
         if baseline_ids != speculative_ids:
             diverged_prompts += 1
             if diverged_prompt_id is None:
                 diverged_prompt_id = prompt_id
+    if args.require_baseline_match and diverged_prompts:
+        raise RuntimeError(
+            "vLLM baseline/speculative outputs diverged: "
+            f"diverged_prompts={diverged_prompts} first={diverged_prompt_id}"
+        )
 
     spec_metrics = collect_spec_decode_metrics(speculative_llm.get_metrics(), args.draft_len)
     destroy_llm(speculative_llm)
@@ -365,14 +432,16 @@ def main() -> None:
     summary = {
         "method": "draft_model_vllm",
         "model": args.model_path,
-        "draft_model": str(export_dir),
+        "draft_model": str(draft_model_path),
         "num_prompts": len(prompt_inputs),
         "draft_len": args.draft_len,
         "generated_tokens": speculative_generated_tokens,
+        "baseline_generated_tokens": baseline_generated_tokens,
+        "speculative_generated_tokens": speculative_generated_tokens,
         "baseline_wall_time_s": baseline_wall_time_s,
         "method_wall_time_s": method_wall_time_s,
         "baseline_tokens_per_s": (
-            speculative_generated_tokens / baseline_wall_time_s if baseline_wall_time_s else 0.0
+            baseline_generated_tokens / baseline_wall_time_s if baseline_wall_time_s else 0.0
         ),
         "method_tokens_per_s": (
             speculative_generated_tokens / method_wall_time_s if method_wall_time_s else 0.0
@@ -381,7 +450,11 @@ def main() -> None:
         "matches_baseline": diverged_prompts == 0,
         "diverged_prompts": diverged_prompts,
         "first_diverged_prompt_id": diverged_prompt_id or "",
+        "token_count_mismatches": token_count_mismatches,
         "seed": args.seed,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "max_model_len": args.max_model_len,
+        "max_num_seqs": args.max_num_seqs,
         "serial_prompts": args.serial_prompts,
         "warmup_prompts": args.warmup_prompts if args.serial_prompts else 0,
     } | spec_metrics

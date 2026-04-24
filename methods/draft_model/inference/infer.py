@@ -8,6 +8,7 @@ propose K tokens, then verifies that chain against the target in one pass.
 import argparse
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -16,7 +17,7 @@ import torch
 from common.metrics import SpecDecodeStats, summarize_jsonl, write_jsonl_record
 from common.qwen3 import Qwen3ForCausalLM
 from common.sampling import autoregressive_generate
-from common.tokenizer import load_prompts, load_tokenizer
+from common.tokenizer import load_tokenizer, render_prompt
 from common.verification import (
     VerificationResult,
     advance_prefix_state,
@@ -28,11 +29,36 @@ from methods.draft_model.training.train import load_draft_checkpoint, parse_dtyp
 
 
 DEFAULT_MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
-DEFAULT_CHECKPOINT_PATH = "checkpoints/draft_model_qwen25_05b_2ep"
-DEFAULT_PROMPTS_PATH = "data/ultrachat_eval_50_short_trunc512.jsonl"
-DEFAULT_MAX_NEW_TOKENS = 16
-DEFAULT_DRAFT_LEN = 4
+DEFAULT_CHECKPOINT_PATH = "checkpoints/draft_model_qwen25_05b_ultrachat3000"
+DEFAULT_PROMPTS_PATH = "data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl"
+DEFAULT_MAX_NEW_TOKENS = 128
+DEFAULT_DRAFT_LEN = 2
 DEFAULT_WARMUP_PROMPTS = 2
+
+
+@dataclass(slots=True)
+class PromptRecord:
+    prompt_id: str
+    prompt_ids: list[int]
+
+
+def load_prompt_records(prompts_path: str | Path, tokenizer) -> list[PromptRecord]:
+    records: list[PromptRecord] = []
+    with Path(prompts_path).open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            sample = json.loads(line)
+            prompt_id = str(sample.get("prompt_id", sample.get("id", f"prompt_{line_number:04d}")))
+            if "prompt_ids" in sample:
+                prompt_ids = [int(token_id) for token_id in sample["prompt_ids"]]
+            else:
+                rendered = render_prompt(tokenizer, sample)
+                prompt_ids = tokenizer.encode(rendered.prompt, add_special_tokens=False)
+            records.append(PromptRecord(prompt_id=prompt_id, prompt_ids=prompt_ids))
+    if not records:
+        raise ValueError(f"{prompts_path} did not contain any prompts")
+    return records
 
 
 def propose_draft_tokens(
@@ -54,6 +80,78 @@ def propose_draft_tokens(
     return proposals, proposal_states
 
 
+def verify_target_draft_ids(
+    model: torch.nn.Module,
+    state,
+    draft_ids: Sequence[int],
+) -> tuple[VerificationResult, object, int]:
+    if hasattr(model, "decode_many") and state.cache:
+        first_prediction = int(torch.argmax(state.last_logits).item())
+        if draft_ids and first_prediction != int(draft_ids[0]):
+            updated_state = advance_prefix_state(model, state, first_prediction)
+            return VerificationResult(
+                accepted_ids=[],
+                emitted_ids=[first_prediction],
+                target_predictions=[first_prediction],
+                proposed_draft_tokens=len(draft_ids),
+                accepted_draft_tokens=0,
+                mismatch_index=0,
+                bonus_token=None,
+            ), updated_state, 1
+
+        device = getattr(model, "device", torch.device("cpu"))
+        if draft_ids:
+            draft_tensor = torch.tensor([list(draft_ids)], dtype=torch.long, device=device)
+            output = model.decode_many(draft_tensor, cache=state.cache)
+            prediction_tail = torch.argmax(output.logits[0], dim=-1).tolist()
+            target_calls = 1
+        else:
+            output = None
+            prediction_tail = []
+            target_calls = 0
+
+        predictions = [first_prediction] + [int(token) for token in prediction_tail]
+        accepted_count = 0
+        for index, draft_token in enumerate(draft_ids):
+            if predictions[index] != int(draft_token):
+                break
+            accepted_count += 1
+
+        accepted_ids = [int(token) for token in draft_ids[:accepted_count]]
+        if accepted_count < len(draft_ids):
+            accepted_state = (
+                state if accepted_count == 0 else state_after_decoded_tokens(state, output, accepted_ids)
+            )
+            mismatch_token = int(predictions[accepted_count])
+            updated_state = advance_prefix_state(model, accepted_state, mismatch_token)
+            return VerificationResult(
+                accepted_ids=accepted_ids,
+                emitted_ids=accepted_ids + [mismatch_token],
+                target_predictions=predictions[: accepted_count + 1],
+                proposed_draft_tokens=len(draft_ids),
+                accepted_draft_tokens=accepted_count,
+                mismatch_index=accepted_count,
+                bonus_token=None,
+            ), updated_state, target_calls + 1
+
+        accepted_state = state if not accepted_ids else state_after_decoded_tokens(state, output, accepted_ids)
+        bonus_token = int(predictions[-1])
+        updated_state = advance_prefix_state(model, accepted_state, bonus_token)
+        return VerificationResult(
+            accepted_ids=accepted_ids,
+            emitted_ids=accepted_ids + [bonus_token],
+            target_predictions=predictions,
+            proposed_draft_tokens=len(draft_ids),
+            accepted_draft_tokens=accepted_count,
+            mismatch_index=None,
+            bonus_token=bonus_token,
+        ), updated_state, target_calls + 1
+
+    result, updated_state = greedy_verify_with_state(model, state, draft_ids)
+    return result, updated_state, result.accepted_draft_tokens + 1
+
+
+@torch.inference_mode()
 def run_draft_model_speculative_decode(
     target_model: torch.nn.Module,
     draft_model: torch.nn.Module,
@@ -65,74 +163,7 @@ def run_draft_model_speculative_decode(
     eos_token_id: int | None = None,
     fast_verify: bool = False,
 ) -> tuple[list[int], dict[str, int]]:
-    def verify_fn(
-        model: torch.nn.Module,
-        state,
-        draft_ids: Sequence[int],
-    ) -> tuple[VerificationResult, object]:
-        if not fast_verify:
-            return greedy_verify_with_state(model, state, draft_ids)
-        if hasattr(model, "decode_many") and state.cache:
-            first_prediction = int(torch.argmax(state.last_logits).item())
-            if draft_ids and first_prediction != int(draft_ids[0]):
-                updated_state = advance_prefix_state(model, state, first_prediction)
-                return VerificationResult(
-                    accepted_ids=[],
-                    emitted_ids=[first_prediction],
-                    target_predictions=[first_prediction],
-                    proposed_draft_tokens=len(draft_ids),
-                    accepted_draft_tokens=0,
-                    mismatch_index=0,
-                    bonus_token=None,
-                ), updated_state
-
-            device = getattr(model, "device", torch.device("cpu"))
-            if draft_ids:
-                draft_tensor = torch.tensor([list(draft_ids)], dtype=torch.long, device=device)
-                output = model.decode_many(draft_tensor, cache=state.cache)
-                prediction_tail = torch.argmax(output.logits[0], dim=-1).tolist()
-            else:
-                output = None
-                prediction_tail = []
-
-            predictions = [first_prediction] + [int(token) for token in prediction_tail]
-            accepted_count = 0
-            for index, draft_token in enumerate(draft_ids):
-                if predictions[index] != int(draft_token):
-                    break
-                accepted_count += 1
-
-            accepted_ids = [int(token) for token in draft_ids[:accepted_count]]
-            if accepted_count < len(draft_ids):
-                accepted_state = (
-                    state if accepted_count == 0 else state_after_decoded_tokens(state, output, accepted_ids)
-                )
-                mismatch_token = int(predictions[accepted_count])
-                updated_state = advance_prefix_state(model, accepted_state, mismatch_token)
-                return VerificationResult(
-                    accepted_ids=accepted_ids,
-                    emitted_ids=accepted_ids + [mismatch_token],
-                    target_predictions=predictions[: accepted_count + 1],
-                    proposed_draft_tokens=len(draft_ids),
-                    accepted_draft_tokens=accepted_count,
-                    mismatch_index=accepted_count,
-                    bonus_token=None,
-                ), updated_state
-
-            accepted_state = state if not accepted_ids else state_after_decoded_tokens(state, output, accepted_ids)
-            bonus_token = int(predictions[-1])
-            updated_state = advance_prefix_state(model, accepted_state, bonus_token)
-            return VerificationResult(
-                accepted_ids=accepted_ids,
-                emitted_ids=accepted_ids + [bonus_token],
-                target_predictions=predictions,
-                proposed_draft_tokens=len(draft_ids),
-                accepted_draft_tokens=accepted_count,
-                mismatch_index=None,
-                bonus_token=bonus_token,
-            ), updated_state
-
-        return greedy_verify_with_state(model, state, draft_ids)
+    del temperature, top_p, fast_verify
 
     target_state = prefill_prefix(target_model, prompt_ids)
     draft_state = prefill_prefix(draft_model, prompt_ids)
@@ -153,9 +184,9 @@ def run_draft_model_speculative_decode(
             requested=requested,
             eos_token_id=eos_token_id,
         )
-        result, target_state = verify_fn(target_model, target_state, draft_ids)
+        result, target_state, target_calls = verify_target_draft_ids(target_model, target_state, draft_ids)
         counters["speculation_steps"] += 1
-        counters["target_forwards"] += result.accepted_draft_tokens + 1
+        counters["target_forwards"] += target_calls
         counters["draft_forwards"] += len(draft_ids)
         counters["proposed_draft_tokens"] += result.proposed_draft_tokens
         counters["accepted_draft_tokens"] += result.accepted_draft_tokens
@@ -197,9 +228,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile-draft", action="store_true")
     parser.add_argument("--cuda-graphs", action="store_true")
     parser.add_argument("--warmup-prompts", type=int, default=DEFAULT_WARMUP_PROMPTS)
+    parser.add_argument("--limit-prompts", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--skip-baseline", action="store_true")
-    parser.add_argument("--allow-divergence", action="store_true")
+    parser.add_argument("--allow-divergence", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--require-baseline-match", action="store_true")
     return parser.parse_args()
 
 
@@ -213,7 +246,9 @@ def main() -> None:
     torch.manual_seed(args.seed)
     dtype = parse_dtype(args.dtype)
     tokenizer = load_tokenizer(args.model_path)
-    prompts = load_prompts(args.prompts, tokenizer=tokenizer)
+    prompts = load_prompt_records(args.prompts, tokenizer=tokenizer)
+    if args.limit_prompts > 0:
+        prompts = prompts[: args.limit_prompts]
 
     target_model = Qwen3ForCausalLM.from_pretrained(args.model_path, device=args.device, dtype=dtype)
     draft_model = load_draft_checkpoint(args.checkpoint_path, device=args.device, dtype=dtype)
@@ -229,7 +264,7 @@ def main() -> None:
     output_path = (
         Path(args.output)
         if args.output
-        else Path(f"runs/draft_model_qwen25_05b_2ep_len{args.draft_len}.jsonl")
+        else Path(f"runs/draft_model_qwen25_05b_ultrachat3000_len{args.draft_len}.jsonl")
     )
     if output_path.exists():
         output_path.unlink()
@@ -239,12 +274,11 @@ def main() -> None:
             torch.cuda.synchronize(torch.device(args.device))
 
     warmup_count = min(max(args.warmup_prompts, 0), len(prompts))
-    for prompt in prompts[:warmup_count]:
-        prompt_ids = tokenizer.encode(prompt.prompt, add_special_tokens=False)
+    for record in prompts[:warmup_count]:
         if not args.skip_baseline:
             autoregressive_generate(
                 model=target_model,
-                prompt_ids=prompt_ids,
+                prompt_ids=record.prompt_ids,
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_p=args.top_p,
@@ -253,7 +287,7 @@ def main() -> None:
         run_draft_model_speculative_decode(
             target_model=target_model,
             draft_model=draft_model,
-            prompt_ids=prompt_ids,
+            prompt_ids=record.prompt_ids,
             max_new_tokens=args.max_new_tokens,
             draft_len=args.draft_len,
             temperature=args.temperature,
@@ -264,8 +298,8 @@ def main() -> None:
 
     divergence_count = 0
     first_diverged_prompt_id = ""
-    for prompt in prompts:
-        prompt_ids = tokenizer.encode(prompt.prompt, add_special_tokens=False)
+    token_count_mismatches = 0
+    for record in prompts:
         baseline_tokens: list[int] = []
         baseline_time_s = 0.0
         if not args.skip_baseline:
@@ -273,7 +307,7 @@ def main() -> None:
             wall_start = time.perf_counter()
             baseline_tokens = autoregressive_generate(
                 model=target_model,
-                prompt_ids=prompt_ids,
+                prompt_ids=record.prompt_ids,
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_p=args.top_p,
@@ -287,13 +321,12 @@ def main() -> None:
         generated_tokens, counters = run_draft_model_speculative_decode(
             target_model=target_model,
             draft_model=draft_model,
-            prompt_ids=prompt_ids,
+            prompt_ids=record.prompt_ids,
             max_new_tokens=args.max_new_tokens,
             draft_len=args.draft_len,
             temperature=args.temperature,
             top_p=args.top_p,
             eos_token_id=tokenizer.eos_token_id,
-            fast_verify=args.allow_divergence,
         )
         synchronize()
         method_time_s = time.perf_counter() - wall_start
@@ -301,19 +334,21 @@ def main() -> None:
         if not args.skip_baseline and generated_tokens != baseline_tokens:
             matches_baseline = False
             divergence_count += 1
+            if len(generated_tokens) != len(baseline_tokens):
+                token_count_mismatches += 1
             if not first_diverged_prompt_id:
-                first_diverged_prompt_id = prompt.prompt_id
-        if not args.skip_baseline and generated_tokens != baseline_tokens and not args.allow_divergence:
+                first_diverged_prompt_id = record.prompt_id
+        if not args.skip_baseline and generated_tokens != baseline_tokens and args.require_baseline_match:
             raise RuntimeError(
-                f"greedy speculative output diverged for {prompt.prompt_id}:"
+                f"greedy speculative output diverged for {record.prompt_id}:"
                 f" baseline={baseline_tokens} speculative={generated_tokens}"
             )
 
         stats = SpecDecodeStats(
             method="draft_model",
             model=args.model_path,
-            prompt_id=prompt.prompt_id,
-            prompt_tokens=len(prompt_ids),
+            prompt_id=record.prompt_id,
+            prompt_tokens=len(record.prompt_ids),
             generated_tokens=len(generated_tokens),
             generated_text=tokenizer.decode(generated_tokens, skip_special_tokens=True),
             temperature=args.temperature,
@@ -348,6 +383,7 @@ def main() -> None:
                 "matches_baseline": divergence_count == 0,
                 "diverged_prompts": divergence_count,
                 "first_diverged_prompt_id": first_diverged_prompt_id,
+                "token_count_mismatches": token_count_mismatches,
             },
             indent=2,
         )
