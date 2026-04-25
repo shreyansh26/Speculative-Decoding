@@ -409,6 +409,8 @@ The checkpoint was trained from `Qwen/Qwen2.5-0.5B-Instruct` on the 3000-row Ult
 - length-8 acceptance proxy: `31.82%`
 - mean accepted tokens per PARD step proxy: `2.5375`
 
+More PARD results and implementation notes are available in [`README_PARD.md`](README_PARD.md).
+
 Latest PARD benchmark results. All vLLM rows use fixed `gpu_memory_utilization=0.85` for both the baseline engine and the speculative engine.
 
 | Path | Inference draft length | Baseline wall time | PARD wall time | Baseline mean latency | PARD mean latency | Baseline throughput | PARD throughput | Speedup | Acceptance |
