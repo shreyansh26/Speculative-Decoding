@@ -1,4 +1,4 @@
-# Speculative Decoding From Scratch
+# Speculative Decoding Implementations
 
 This repository implements speculative decoding methods from scratch and benchmarks them behind one shared decoding contract.
 
