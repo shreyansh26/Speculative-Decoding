@@ -23,16 +23,18 @@ uv sync --python 3.12
 
 Run scripts with `uv run python ...`; the command examples below do not require shell activation.
 
+Large checkpoint artifacts are not tracked in git. Mirrored artifacts are available under the [`checkpoints/` Drive folder](https://drive.google.com/drive/folders/1SV9VgCYe1oEJs6T29nvprDP-ody4SOmd).
+
 ## EAGLE-3
 
 Paper: [EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test](https://arxiv.org/abs/2503.01840).
 
 Current reference artifacts:
 
-- local checkpoint, `ttt_steps=3`: `checkpoints/eagle3_qwen25_7b_eval100_ce_len3`
-- local vLLM export, `ttt_steps=3`: `checkpoints/vllm_exports/eagle3_eval100_len2`
-- local checkpoint, `ttt_steps=6` and best vLLM result: `checkpoints/eagle3_qwen25_7b_eval100_ce_ttt6_len3`
-- local vLLM export, `ttt_steps=6`: `checkpoints/vllm_exports/eagle3_eval100_ttt6_len2`
+- local checkpoint, `ttt_steps=3`: [`checkpoints/eagle3_qwen25_7b_eval100_ce_len3`](https://drive.google.com/drive/folders/1TNIKVrKlE-qdmps8ABq9FZbtKtVw37gI)
+- local vLLM export, `ttt_steps=3`: [`checkpoints/vllm_exports/eagle3_eval100_len2`](https://drive.google.com/drive/folders/1xYORlRlmGyMdC9c5KTaUL7vcqHKag1x5)
+- local checkpoint, `ttt_steps=6` and best vLLM result: [`checkpoints/eagle3_qwen25_7b_eval100_ce_ttt6_len3`](https://drive.google.com/drive/folders/13-SFBI1DtGAf3DXUxywfZMq5Dv1ny2rf)
+- local vLLM export, `ttt_steps=6`: [`checkpoints/vllm_exports/eagle3_eval100_ttt6_len2`](https://drive.google.com/drive/folders/1-THyU0wGgQ7q5ykJPveF6nGKeWD2BdqR)
 - target model: `Qwen/Qwen2.5-7B-Instruct`
 - full distillation set: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl`
 - reference overfit train/eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
@@ -113,7 +115,7 @@ CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/training/train.py train \
   --device cuda
 ```
 
-For the higher-TTT local checkpoint used in the `ttt_steps=6` rows, run the same training command with `--output checkpoints/eagle3_qwen25_7b_eval100_ce_ttt6_len3` and `--ttt-steps 6`.
+For the higher-TTT local checkpoint used in the `ttt_steps=6` rows, run the same training command with `--output checkpoints/eagle3_qwen25_7b_eval100_ce_ttt6_len3` ([Drive folder](https://drive.google.com/drive/folders/13-SFBI1DtGAf3DXUxywfZMq5Dv1ny2rf)) and `--ttt-steps 6`.
 
 Run non-vLLM PyTorch inference:
 
@@ -272,7 +274,7 @@ CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/modelopt_experiment.py \
 
 Current reference artifact:
 
-- checkpoint: `checkpoints/draft_model_qwen25_05b_ultrachat3000`
+- checkpoint: [`checkpoints/draft_model_qwen25_05b_ultrachat3000`](https://drive.google.com/drive/folders/1Foho9UVLsHjTngvjs2qDwR_7wrYByR_L)
 - target model: `Qwen/Qwen2.5-7B-Instruct`
 - draft base: `Qwen/Qwen2.5-0.5B-Instruct`
 - full distillation set: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl`
@@ -390,7 +392,7 @@ Paper: [PARD: Accelerating LLM Inference with Low-Cost PARallel Draft Model Adap
 
 Current reference artifact:
 
-- checkpoint: `checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000`
+- checkpoint: [`checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000`](https://drive.google.com/drive/folders/17fYaopuGkUpQfa-DWwshaP04tLLRU2hA)
 - target model: `Qwen/Qwen2.5-7B-Instruct`
 - draft base: `Qwen/Qwen2.5-0.5B-Instruct`
 - full distillation set: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl`
@@ -562,7 +564,7 @@ Paper: [Medusa: Simple LLM Inference Acceleration Framework with Multiple Decodi
 
 Current reference artifacts:
 
-- local checkpoint: `checkpoints/medusa_1_qwen25_7b_eval100`
+- local checkpoint: [`checkpoints/medusa_1_qwen25_7b_eval100`](https://drive.google.com/drive/folders/119hhIITWUwGU95FWXkltiC0cOPDX6aw9)
 - target model: `Qwen/Qwen2.5-7B-Instruct`
 - train/eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
 - eval setup: `100` train-overlap prompts, `max_new_tokens=128`
@@ -824,4 +826,3 @@ uv run python methods/suffix_decoding/inference/infer_vllm.py \
   --warmup-prompts 1 \
   --seed 0
 ```
-
