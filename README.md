@@ -10,7 +10,7 @@ Every method plugs into the same target-model interface, greedy verifier, metric
 | --- | --- | --- | --- |
 | EAGLE-3 | `methods/eagle3` | Low/mid/high hidden-state fusion with a lightweight autoregressive drafter, plus a ModelOpt comparison workflow. | non-vLLM and vLLM |
 | Draft model | `methods/draft_model` | Small Qwen-style draft LM trained from Qwen2.5-7B greedy completions, then used with standard speculative verification. | non-vLLM and vLLM |
-| PARD / parallel draft models | `methods/parallel_draft_models` | Parallel future-token heads that predict multiple draft positions in one target-state pass, with local and vLLM benchmark paths. | non-vLLM and vLLM |
+| PARD / parallel draft models | `methods/parallel_draft_models` | Parallel future-token heads that predict multiple draft positions in one target-state pass, with non-vLLM and vLLM benchmark paths. | non-vLLM and vLLM |
 | Medusa-1 | `methods/medusa_1` | Frozen-backbone future-token heads trained on target completions; non-vLLM inference verifies top-k Medusa tree candidates with a masked Qwen tree forward. | non-vLLM |
 | N-gram prompt lookup | `methods/ngram` | Training-free proposer that finds repeated n-grams in the current prompt and accepted generation history, then verifies drafted continuations with the target model. | non-vLLM and vLLM |
 | Suffix decoding | `methods/suffix_decoding` | Training-free suffix-frequency proposer over prompt/generated history, with optional bounded cache persistence and target verification. | non-vLLM and vLLM |
@@ -23,7 +23,7 @@ uv sync --python 3.12
 
 Run scripts with `uv run python ...`; the command examples below do not require shell activation.
 
-Large checkpoint artifacts are not tracked in git. Mirrored artifacts are available under the [`checkpoints/` Drive folder](https://drive.google.com/drive/folders/1SV9VgCYe1oEJs6T29nvprDP-ody4SOmd).
+Model checkpoints and vLLM exports are available under the [`checkpoints/` folder](https://drive.google.com/drive/folders/1SV9VgCYe1oEJs6T29nvprDP-ody4SOmd) in Google Drive.
 
 ## EAGLE-3
 
@@ -31,10 +31,10 @@ Paper: [EAGLE-3: Scaling up Inference Acceleration of Large Language Models via 
 
 Current reference artifacts:
 
-- local checkpoint, `ttt_steps=3`: [`checkpoints/eagle3_qwen25_7b_eval100_ce_len3`](https://drive.google.com/drive/folders/1TNIKVrKlE-qdmps8ABq9FZbtKtVw37gI)
-- local vLLM export, `ttt_steps=3`: [`checkpoints/vllm_exports/eagle3_eval100_len2`](https://drive.google.com/drive/folders/1xYORlRlmGyMdC9c5KTaUL7vcqHKag1x5)
-- local checkpoint, `ttt_steps=6` and best vLLM result: [`checkpoints/eagle3_qwen25_7b_eval100_ce_ttt6_len3`](https://drive.google.com/drive/folders/13-SFBI1DtGAf3DXUxywfZMq5Dv1ny2rf)
-- local vLLM export, `ttt_steps=6`: [`checkpoints/vllm_exports/eagle3_eval100_ttt6_len2`](https://drive.google.com/drive/folders/1-THyU0wGgQ7q5ykJPveF6nGKeWD2BdqR)
+- checkpoint, `ttt_steps=3`: [`checkpoints/eagle3_qwen25_7b_eval100_ce_len3`](https://drive.google.com/drive/folders/1TNIKVrKlE-qdmps8ABq9FZbtKtVw37gI)
+- vLLM export, `ttt_steps=3`: [`checkpoints/vllm_exports/eagle3_eval100_len2`](https://drive.google.com/drive/folders/1xYORlRlmGyMdC9c5KTaUL7vcqHKag1x5)
+- checkpoint, `ttt_steps=6` and best vLLM result: [`checkpoints/eagle3_qwen25_7b_eval100_ce_ttt6_len3`](https://drive.google.com/drive/folders/13-SFBI1DtGAf3DXUxywfZMq5Dv1ny2rf)
+- vLLM export, `ttt_steps=6`: [`checkpoints/vllm_exports/eagle3_eval100_ttt6_len2`](https://drive.google.com/drive/folders/1-THyU0wGgQ7q5ykJPveF6nGKeWD2BdqR)
 - target model: `Qwen/Qwen2.5-7B-Instruct`
 - full distillation set: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl`
 - reference overfit train/eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
@@ -43,7 +43,7 @@ Current reference artifacts:
 
 `draft_len=2` is the inference setting: each EAGLE-3 speculation step uses one target/base seed token plus up to two EAGLE-proposed speculative tokens, so a fully accepted step can emit up to three tokens. The checkpoint suffix `len3` refers to the training rollout/checkpoint configuration, not the best inference draft length.
 
-Latest local implementation benchmark results on GPU 4. All vLLM rows use `--gpu-memory-utilization 0.85` for both the baseline engine and the speculative engine.
+Latest implementation benchmark results. All vLLM rows use `--gpu-memory-utilization 0.85` for both the baseline engine and the speculative engine.
 
 | Path | Train TTT | Baseline wall time | EAGLE wall time | Baseline mean latency | EAGLE mean latency | Baseline throughput | EAGLE throughput | Speedup | Acceptance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -74,7 +74,7 @@ Benchmark files:
 
 Output divergence from the baseline is diagnostic only for EAGLE-3 runs. The benchmark records `matches_baseline`, diverged prompt counts, and token-count mismatches, but speedup is computed from the measured wall time and generated-token throughput.
 
-### Local EAGLE-3 Commands
+### EAGLE-3 Commands
 
 Prepare the UltraChat distillation data with vLLM greedy completions:
 
@@ -92,7 +92,7 @@ CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/training/train.py prepare-da
   --max-model-len 1184
 ```
 
-Train the current reference local checkpoint:
+Train the current reference checkpoint:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/training/train.py train \
@@ -115,7 +115,7 @@ CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/training/train.py train \
   --device cuda
 ```
 
-For the higher-TTT local checkpoint used in the `ttt_steps=6` rows, run the same training command with `--output checkpoints/eagle3_qwen25_7b_eval100_ce_ttt6_len3` ([Drive folder](https://drive.google.com/drive/folders/13-SFBI1DtGAf3DXUxywfZMq5Dv1ny2rf)) and `--ttt-steps 6`.
+For the higher-TTT checkpoint used in the `ttt_steps=6` rows, run the same training command with `--output checkpoints/eagle3_qwen25_7b_eval100_ce_ttt6_len3` ([Drive folder](https://drive.google.com/drive/folders/13-SFBI1DtGAf3DXUxywfZMq5Dv1ny2rf)) and `--ttt-steps 6`.
 
 Run non-vLLM PyTorch inference:
 
@@ -223,7 +223,7 @@ CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/inference/infer_vllm.py \
 
 ### ModelOpt EAGLE-3 Comparison Commands
 
-The ModelOpt path is intentionally isolated in `methods/eagle3/modelopt_experiment.py` so it can be deleted without touching the local implementation. It trains with `modelopt.torch.speculative`, exports the official ModelOpt checkpoint, converts it to the vLLM/speculators checkpoint layout, and benchmarks through the same local vLLM runner. ModelOpt comparison inference is vLLM-only.
+The ModelOpt path is intentionally isolated in `methods/eagle3/modelopt_experiment.py` so it can be deleted without touching the implementation. It trains with `modelopt.torch.speculative`, exports the official ModelOpt checkpoint, converts it to the vLLM/speculators checkpoint layout, and benchmarks through the same vLLM runner. ModelOpt comparison inference is vLLM-only.
 
 One-time experiment dependencies:
 
@@ -289,7 +289,7 @@ The current draft-model checkpoint was trained from scratch on the 3000-row Ultr
 - acceptance proxy: `92.86%`
 - mean accepted tokens per step proxy: `1.8567`
 
-Latest draft-model benchmark results on GPU 4. All vLLM rows use `--gpu-memory-utilization 0.85` for both the baseline engine and the speculative engine.
+Latest draft-model benchmark results. All vLLM rows use `--gpu-memory-utilization 0.85` for both the baseline engine and the speculative engine.
 
 | Path | Baseline wall time | Draft-model wall time | Baseline mean latency | Draft-model mean latency | Baseline throughput | Draft-model throughput | Speedup | Acceptance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -409,7 +409,7 @@ The checkpoint was trained from `Qwen/Qwen2.5-0.5B-Instruct` on the 3000-row Ult
 - length-8 acceptance proxy: `31.82%`
 - mean accepted tokens per PARD step proxy: `2.5375`
 
-Latest PARD benchmark results on GPU 4. All vLLM rows use fixed `gpu_memory_utilization=0.85` for both the baseline engine and the speculative engine.
+Latest PARD benchmark results. All vLLM rows use fixed `gpu_memory_utilization=0.85` for both the baseline engine and the speculative engine.
 
 | Path | Inference draft length | Baseline wall time | PARD wall time | Baseline mean latency | PARD mean latency | Baseline throughput | PARD throughput | Speedup | Acceptance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -564,7 +564,7 @@ Paper: [Medusa: Simple LLM Inference Acceleration Framework with Multiple Decodi
 
 Current reference artifacts:
 
-- local checkpoint: [`checkpoints/medusa_1_qwen25_7b_eval100`](https://drive.google.com/drive/folders/119hhIITWUwGU95FWXkltiC0cOPDX6aw9)
+- checkpoint: [`checkpoints/medusa_1_qwen25_7b_eval100`](https://drive.google.com/drive/folders/119hhIITWUwGU95FWXkltiC0cOPDX6aw9)
 - target model: `Qwen/Qwen2.5-7B-Instruct`
 - train/eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
 - eval setup: `100` train-overlap prompts, `max_new_tokens=128`
@@ -572,7 +572,7 @@ Current reference artifacts:
 
 The Medusa-1 implementation is non-vLLM only. It trains frozen-backbone future-token heads and verifies Medusa tree candidates with a local masked Qwen tree forward. Output divergence from the baseline is diagnostic only for this method; the benchmark records baseline-match fields, but speedup is computed from measured wall time and generated-token throughput.
 
-Latest local non-vLLM benchmark on GPU 4:
+Latest non-vLLM benchmark:
 
 | Path | Eval prompts | Max new tokens | Baseline throughput | Medusa throughput | Speedup | Acceptance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
