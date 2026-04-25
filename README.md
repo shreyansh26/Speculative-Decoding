@@ -1,21 +1,8 @@
 # Speculative Decoding From Scratch
 
-This repository implements speculative decoding methods behind one shared decoding contract:
+This repository implements speculative decoding methods from scratch and benchmarks them behind one shared decoding contract.
 
-- one target-model interface
-- one greedy verifier
-- one metrics schema
-- one baseline autoregressive path
-
-Execution order follows `plans/plan.md`:
-
-1. Phase 0: common infrastructure
-2. Phase 1: n-gram
-3. Phase 2: draft model
-4. Phase 3: Medusa-1
-5. Phase 4: PARD
-6. Phase 5: EAGLE-3
-7. Phase 6: suffix decoding
+Every method plugs into the same target-model interface, greedy verifier, metrics schema, and autoregressive baseline, so speedups and acceptance rates are comparable across proposer designs rather than artifacts of separate evaluation code.
 
 ## Implemented Methods
 
@@ -28,77 +15,17 @@ Execution order follows `plans/plan.md`:
 | EAGLE-3 | `methods/eagle3` | Low/mid/high hidden-state fusion with a lightweight autoregressive drafter, plus a ModelOpt comparison workflow. | non-vLLM and vLLM |
 | Suffix decoding | `methods/suffix_decoding` | Training-free suffix-frequency proposer over prompt/generated history, with optional bounded cache persistence and target verification. | non-vLLM and vLLM |
 
-The project uses `uv` with Python 3.12:
+The project uses `uv` with Python 3.12. From a fresh clone, this creates `.venv`, installs the project, and resolves dependencies from `pyproject.toml`:
 
 ```bash
-uv venv --python 3.12 .venv
-uv pip install -e .
+uv sync --python 3.12
 ```
 
-## Medusa-1
-
-Current reference artifacts:
-
-- local checkpoint: `checkpoints/medusa_1_qwen25_7b_eval100`
-- target model: `Qwen/Qwen2.5-7B-Instruct`
-- train/eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
-- eval setup: `100` train-overlap prompts, `max_new_tokens=128`
-- best inference settings: `draft_len=4`, `tree_topk=5`, `max_tree_nodes=31`
-
-The Medusa-1 implementation is non-vLLM only. It trains frozen-backbone future-token heads and verifies Medusa tree candidates with a local masked Qwen tree forward. Output divergence from the baseline is diagnostic only for this method; the benchmark records baseline-match fields, but speedup is computed from measured wall time and generated-token throughput.
-
-Latest local non-vLLM benchmark on GPU 4:
-
-| Path | Eval prompts | Max new tokens | Baseline throughput | Medusa throughput | Speedup | Acceptance |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| non-vLLM PyTorch loop | `100` | `128` | `63.68 tok/s` | `146.23 tok/s` | `2.2986x` | `40.77%` |
-
-Benchmark file:
-
-- non-vLLM: `runs/medusa_1_eval100_len4_top5_nodes31_greedy128.jsonl`, `runs/medusa_1_eval100_len4_top5_nodes31_greedy128.summary.json`
-
-Train the current reference checkpoint:
-
-```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/medusa_1/training/train.py \
-  --target-model-path Qwen/Qwen2.5-7B-Instruct \
-  --data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
-  --eval-data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
-  --output checkpoints/medusa_1_qwen25_7b_eval100 \
-  --seq-len 1152 \
-  --steps 300 \
-  --batch-size 1 \
-  --grad-accum 1 \
-  --lr 1e-3 \
-  --max-grad-norm 1.0 \
-  --dtype bf16 \
-  --device cuda \
-  --limit-samples 100 \
-  --eval-batches 8
-```
-
-Run non-vLLM PyTorch inference:
-
-```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/medusa_1/inference/infer.py \
-  --model-path Qwen/Qwen2.5-7B-Instruct \
-  --checkpoint-path checkpoints/medusa_1_qwen25_7b_eval100 \
-  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
-  --output runs/medusa_1_eval100_len4_top5_nodes31_greedy128.jsonl \
-  --max-new-tokens 128 \
-  --draft-len 4 \
-  --tree-topk 5 \
-  --max-tree-nodes 31 \
-  --dtype bf16 \
-  --device cuda \
-  --warmup-prompts 2
-```
+Run scripts with `uv run python ...`; the command examples below do not require shell activation.
 
 ## EAGLE-3
+
+Paper: [EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test](https://arxiv.org/abs/2503.01840).
 
 Current reference artifacts:
 
@@ -145,231 +72,12 @@ Benchmark files:
 
 Output divergence from the baseline is diagnostic only for EAGLE-3 runs. The benchmark records `matches_baseline`, diverged prompt counts, and token-count mismatches, but speedup is computed from the measured wall time and generated-token throughput.
 
-## Training-Free Wiki Extract Dataset
-
-Current reference artifacts:
-
-- target model: `Qwen/Qwen2.5-7B-Instruct`
-- eval set: `data/wiki_extract_ngram_eval100_qwen25_7b.jsonl`
-- eval setup: first `50` prompts, `max_new_tokens=128`, `bf16`
-- vLLM setup: baseline and speculative engines both use `--gpu-memory-utilization 0.85`
-
-The Wikipedia corpus is embedded in each request: dataset prep writes the full article into `prompt` and `prompt_ids`, so both methods build draft context from that request's prompt tokens plus accepted generation history. The final runs do not use a shared external corpus index; the non-vLLM suffix script has optional `--global-cache`, but it was not used here.
-
-Prepare the extractive Wikipedia eval set:
-
-```bash
-. .venv/bin/activate
-python data/prepare_ngram_wiki.py \
-  --model-path Qwen/Qwen2.5-7B-Instruct \
-  --output data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
-  --num-questions 100 \
-  --prompt-token-budget 14336
-```
-
-## N-gram Wiki Extract Benchmarks
-
-Reference settings:
-
-- target model: `Qwen/Qwen2.5-7B-Instruct`
-- eval setup: first `50` prompts, `max_new_tokens=128`, `bf16`
-- n-gram settings: `draft_len=5`, prompt lookup `3..8`
-- vLLM setup: baseline and speculative engines both use `--gpu-memory-utilization 0.85`
-
-Output divergence from the baseline is allowed for these rows. The benchmark artifacts still record exact divergence counts and token-count mismatches.
-
-| Path | Baseline wall time | N-gram wall time | Baseline mean latency | N-gram mean latency | Baseline throughput | N-gram throughput | Speedup | Decode speedup | Acceptance |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| non-vLLM PyTorch loop | `120.4061s` | `58.1024s` | `2.4081s` | `1.1620s` | `32.16 tok/s` | `66.64 tok/s` | `2.0723x` | `3.2221x` | `84.37%` |
-| vLLM batched throughput (`max_num_seqs=16`) | `12.0867s` | `10.9570s` | n/a | n/a | `305.54 tok/s` | `336.86 tok/s` | `1.1031x` | `1.1611x` | `47.67%` |
-| vLLM serial latency (`max_num_seqs=1`) | `33.0454s` | `17.5306s` | `0.6609s` | `0.3506s` | `114.54 tok/s` | `213.23 tok/s` | `1.8850x` | `2.9128x` | `83.73%` |
-
-The non-vLLM table row uses aggregate wall-time speedup from per-prompt JSONL records. The emitted summary file also reports mean per-prompt speedup `2.1818x`. For vLLM, the batched row uses `ngram_gpu`; the serial row uses `ngram` because vLLM `0.19.1` fails to initialize `ngram_gpu` at batch size `1`.
-
-Benchmark files:
-
-- non-vLLM: `runs/ngram_wiki50_nonvllm_bf16.jsonl`, `runs/ngram_wiki50_nonvllm_bf16.summary.json`
-- vLLM batched: `runs/ngram_wiki50_vllm_batched.baseline.json`, `runs/ngram_wiki50_vllm_batched.summary.json`
-- vLLM serial: `runs/ngram_wiki50_vllm_serial.baseline.json`, `runs/ngram_wiki50_vllm_serial.summary.json`
-
-### N-gram Commands
-
-Run n-gram non-vLLM PyTorch inference:
-
-```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/ngram/inference/infer.py \
-  --model-path Qwen/Qwen2.5-7B-Instruct \
-  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
-  --output runs/ngram_wiki50_nonvllm_bf16.jsonl \
-  --limit-prompts 50 \
-  --max-new-tokens 128 \
-  --draft-len 5 \
-  --prompt-lookup-min 3 \
-  --prompt-lookup-max 8 \
-  --max-model-len 16384 \
-  --dtype bf16 \
-  --device cuda \
-  --warmup-prompts 1
-```
-
-Run n-gram vLLM batched throughput inference:
-
-```bash
-export CUDA_VISIBLE_DEVICES=4
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-. .venv/bin/activate
-python methods/ngram/inference/infer_vllm.py \
-  --model-path Qwen/Qwen2.5-7B-Instruct \
-  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
-  --output runs/ngram_wiki50_vllm_batched.summary.json \
-  --baseline-summary-path runs/ngram_wiki50_vllm_batched.baseline.json \
-  --limit-prompts 50 \
-  --max-new-tokens 128 \
-  --draft-len 5 \
-  --prompt-lookup-min 3 \
-  --prompt-lookup-max 8 \
-  --vllm-ngram-method ngram_gpu \
-  --dtype bf16 \
-  --max-model-len 16384 \
-  --max-num-seqs 16 \
-  --warmup-prompts 0 \
-  --seed 0
-```
-
-Run n-gram vLLM serial latency inference:
-
-```bash
-export CUDA_VISIBLE_DEVICES=4
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-. .venv/bin/activate
-python methods/ngram/inference/infer_vllm.py \
-  --model-path Qwen/Qwen2.5-7B-Instruct \
-  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
-  --output runs/ngram_wiki50_vllm_serial.summary.json \
-  --baseline-summary-path runs/ngram_wiki50_vllm_serial.baseline.json \
-  --limit-prompts 50 \
-  --max-new-tokens 128 \
-  --draft-len 5 \
-  --prompt-lookup-min 3 \
-  --prompt-lookup-max 8 \
-  --vllm-ngram-method ngram \
-  --dtype bf16 \
-  --max-model-len 16384 \
-  --max-num-seqs 1 \
-  --serial-prompts \
-  --warmup-prompts 1 \
-  --seed 0
-```
-
-## Suffix-Decoding Wiki Extract Benchmarks
-
-Reference settings:
-
-- target model: `Qwen/Qwen2.5-7B-Instruct`
-- eval setup: first `50` prompts, `max_new_tokens=128`, `bf16`
-- suffix-decoding settings: `draft_len=8`, `max_tree_depth=8`, `max_spec_factor=1.0`, `min_token_prob=0.0`
-- vLLM setup: baseline and speculative engines both use `--gpu-memory-utilization 0.85`
-
-Output divergence from the baseline is allowed for these rows. The benchmark artifacts still record exact divergence counts and token-count mismatches.
-
-| Path | Baseline wall time | Suffix wall time | Baseline mean latency | Suffix mean latency | Baseline throughput | Suffix throughput | Speedup | Decode speedup | Acceptance |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| non-vLLM PyTorch loop | `120.6764s` | `83.0907s` | `2.4135s` | `1.6618s` | `31.90 tok/s` | `46.32 tok/s` | `1.4523x` | `1.8277x` | `59.20%` |
-| vLLM batched throughput (`max_num_seqs=16`) | `11.9448s` | `10.7483s` | n/a | n/a | `309.17 tok/s` | `338.10 tok/s` | `1.1113x` | `1.1030x` | `81.27%` |
-| vLLM serial latency (`max_num_seqs=1`) | `32.8949s` | `17.9576s` | `0.6579s` | `0.3592s` | `115.06 tok/s` | `209.77 tok/s` | `1.8318x` | `2.8594x` | `81.07%` |
-
-The non-vLLM table row uses aggregate wall-time speedup from per-prompt JSONL records. The emitted summary file also reports mean per-prompt speedup `1.4424x`. The vLLM suffix path requires `arctic-inference==0.1.1` in the environment.
-
-Benchmark files:
-
-- non-vLLM: `runs/suffix_wiki50_nonvllm_bf16.jsonl`, `runs/suffix_wiki50_nonvllm_bf16.summary.json`
-- vLLM batched: `runs/suffix_wiki50_vllm_batched.baseline.json`, `runs/suffix_wiki50_vllm_batched.summary.json`
-- vLLM serial: `runs/suffix_wiki50_vllm_serial.baseline.json`, `runs/suffix_wiki50_vllm_serial.summary.json`
-
-### Suffix-Decoding Commands
-
-Run suffix-decoding non-vLLM PyTorch inference:
-
-```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/suffix_decoding/inference/infer.py \
-  --model-path Qwen/Qwen2.5-7B-Instruct \
-  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
-  --output runs/suffix_wiki50_nonvllm_bf16.jsonl \
-  --limit-prompts 50 \
-  --max-new-tokens 128 \
-  --draft-len 8 \
-  --max-tree-depth 8 \
-  --max-spec-factor 1.0 \
-  --min-token-prob 0.0 \
-  --max-model-len 16384 \
-  --dtype bf16 \
-  --device cuda \
-  --warmup-prompts 1
-```
-
-Run suffix-decoding vLLM batched throughput inference. The vLLM suffix path requires `arctic-inference==0.1.1` in the environment.
-
-```bash
-export CUDA_VISIBLE_DEVICES=4
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-. .venv/bin/activate
-python methods/suffix_decoding/inference/infer_vllm.py \
-  --model-path Qwen/Qwen2.5-7B-Instruct \
-  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
-  --output runs/suffix_wiki50_vllm_batched.summary.json \
-  --baseline-summary-path runs/suffix_wiki50_vllm_batched.baseline.json \
-  --limit-prompts 50 \
-  --max-new-tokens 128 \
-  --draft-len 8 \
-  --max-tree-depth 8 \
-  --max-cached-requests 10000 \
-  --max-spec-factor 1.0 \
-  --min-token-prob 0.0 \
-  --dtype bf16 \
-  --max-model-len 16384 \
-  --max-num-seqs 16 \
-  --warmup-prompts 0 \
-  --seed 0
-```
-
-Run suffix-decoding vLLM serial latency inference:
-
-```bash
-export CUDA_VISIBLE_DEVICES=4
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-. .venv/bin/activate
-python methods/suffix_decoding/inference/infer_vllm.py \
-  --model-path Qwen/Qwen2.5-7B-Instruct \
-  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
-  --output runs/suffix_wiki50_vllm_serial.summary.json \
-  --baseline-summary-path runs/suffix_wiki50_vllm_serial.baseline.json \
-  --limit-prompts 50 \
-  --max-new-tokens 128 \
-  --draft-len 8 \
-  --max-tree-depth 8 \
-  --max-cached-requests 10000 \
-  --max-spec-factor 1.0 \
-  --min-token-prob 0.0 \
-  --dtype bf16 \
-  --max-model-len 16384 \
-  --max-num-seqs 1 \
-  --serial-prompts \
-  --warmup-prompts 1 \
-  --seed 0
-```
-
 ### Local EAGLE-3 Commands
 
 Prepare the UltraChat distillation data with vLLM greedy completions:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/eagle3/training/train.py prepare-data \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/training/train.py prepare-data \
   --target-model-path Qwen/Qwen2.5-7B-Instruct \
   --output data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl \
   --eval-output data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
@@ -385,9 +93,7 @@ python methods/eagle3/training/train.py prepare-data \
 Train the current reference local checkpoint:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/eagle3/training/train.py train \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/training/train.py train \
   --target-model-path Qwen/Qwen2.5-7B-Instruct \
   --data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
   --output checkpoints/eagle3_qwen25_7b_eval100_ce_len3 \
@@ -412,9 +118,7 @@ For the higher-TTT local checkpoint used in the `ttt_steps=6` rows, run the same
 Run non-vLLM PyTorch inference:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/eagle3/inference/infer.py \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/inference/infer.py \
   --model-path Qwen/Qwen2.5-7B-Instruct \
   --checkpoint-path checkpoints/eagle3_qwen25_7b_eval100_ce_len3 \
   --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
@@ -429,9 +133,7 @@ python methods/eagle3/inference/infer.py \
 Run non-vLLM PyTorch inference for the `ttt_steps=6` checkpoint:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/eagle3/inference/infer.py \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/inference/infer.py \
   --model-path Qwen/Qwen2.5-7B-Instruct \
   --checkpoint-path checkpoints/eagle3_qwen25_7b_eval100_ce_ttt6_len3 \
   --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
@@ -446,9 +148,7 @@ python methods/eagle3/inference/infer.py \
 Run vLLM batched throughput inference:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/eagle3/inference/infer_vllm.py \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/inference/infer_vllm.py \
   --model-path Qwen/Qwen2.5-7B-Instruct \
   --checkpoint-path checkpoints/eagle3_qwen25_7b_eval100_ce_len3 \
   --export-dir checkpoints/vllm_exports/eagle3_eval100_len2 \
@@ -466,9 +166,7 @@ python methods/eagle3/inference/infer_vllm.py \
 Run vLLM serial latency inference:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/eagle3/inference/infer_vllm.py \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/inference/infer_vllm.py \
   --model-path Qwen/Qwen2.5-7B-Instruct \
   --draft-model-path checkpoints/vllm_exports/eagle3_eval100_len2 \
   --skip-export \
@@ -487,9 +185,7 @@ python methods/eagle3/inference/infer_vllm.py \
 Run vLLM batched throughput inference for the `ttt_steps=6` checkpoint:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/eagle3/inference/infer_vllm.py \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/inference/infer_vllm.py \
   --model-path Qwen/Qwen2.5-7B-Instruct \
   --draft-model-path checkpoints/vllm_exports/eagle3_eval100_ttt6_len2 \
   --skip-export \
@@ -507,9 +203,7 @@ python methods/eagle3/inference/infer_vllm.py \
 Run vLLM serial latency inference for the `ttt_steps=6` checkpoint:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/eagle3/inference/infer_vllm.py \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/inference/infer_vllm.py \
   --model-path Qwen/Qwen2.5-7B-Instruct \
   --draft-model-path checkpoints/vllm_exports/eagle3_eval100_ttt6_len2 \
   --skip-export \
@@ -543,9 +237,7 @@ uv pip install --python .venv/bin/python -e ref_repos/Model-Optimizer \
 Train, export, convert, and run the default batched vLLM benchmark:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/eagle3/modelopt_experiment.py \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/modelopt_experiment.py \
   --mode all \
   --gpu-memory-utilization 0.85 \
   --overwrite-data \
@@ -556,9 +248,7 @@ python methods/eagle3/modelopt_experiment.py \
 Run only the ModelOpt vLLM batched benchmark after the export exists:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/eagle3/modelopt_experiment.py \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/modelopt_experiment.py \
   --mode bench \
   --max-num-seqs 16 \
   --gpu-memory-utilization 0.85 \
@@ -569,9 +259,7 @@ python methods/eagle3/modelopt_experiment.py \
 Run only the ModelOpt vLLM serial latency benchmark after the export exists:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/eagle3/modelopt_experiment.py \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/eagle3/modelopt_experiment.py \
   --mode bench \
   --serial-prompts \
   --max-num-seqs 1 \
@@ -580,7 +268,125 @@ python methods/eagle3/modelopt_experiment.py \
   --baseline-summary-path runs/eagle3_modelopt_eval100_len2_vllm_serial.baseline.json
 ```
 
+## Draft Model
+
+Current reference artifact:
+
+- checkpoint: `checkpoints/draft_model_qwen25_05b_ultrachat3000`
+- target model: `Qwen/Qwen2.5-7B-Instruct`
+- draft base: `Qwen/Qwen2.5-0.5B-Instruct`
+- full distillation set: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl`
+- reference eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
+- eval setup: `100` train-overlap prompts, `max_new_tokens=128`
+- best measured inference draft length: `2`
+
+The current draft-model checkpoint was trained from scratch on the 3000-row UltraChat/Qwen2.5-7B completion set, not resumed from the 100-row overfit checkpoint. Final teacher-forced eval on the 100-row eval file:
+
+- eval loss: `0.1941`
+- top-1 match: `95.17%`
+- acceptance proxy: `92.86%`
+- mean accepted tokens per step proxy: `1.8567`
+
+Latest draft-model benchmark results on GPU 4. All vLLM rows use `--gpu-memory-utilization 0.85` for both the baseline engine and the speculative engine.
+
+| Path | Baseline wall time | Draft-model wall time | Baseline mean latency | Draft-model mean latency | Baseline throughput | Draft-model throughput | Speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| vLLM batched throughput (`max_num_seqs=16`) | `6.6198s` | `6.9635s` | n/a | n/a | `1830.57 tok/s` | `1740.93 tok/s` | `0.9506x` | `82.09%` |
+| vLLM serial latency (`max_num_seqs=1`) | `74.4407s` | `71.4878s` | `0.7444s` | `0.7149s` | `162.63 tok/s` | `169.65 tok/s` | `1.0413x` | `81.55%` |
+| non-vLLM PyTorch loop | `201.1899s` | `368.4114s` | `2.0119s` | `3.6841s` | `60.21 tok/s` | `32.88 tok/s` | `0.5461x` | `81.79%` |
+
+For vLLM batched throughput, `draft_len=3` was worse on the same baseline: `0.8710x` speedup with `77.09%` acceptance. The non-vLLM PyTorch path reaches high acceptance but remains slower because it pays a separate 0.5B draft-model forward loop in Python.
+
+Benchmark files:
+
+- vLLM batched: `runs/draft_model_ultrachat3000_len2_vllm_batched.summary.json`
+- vLLM serial: `runs/draft_model_ultrachat3000_len2_vllm_serial.summary.json`
+- vLLM batched, `draft_len=3`: `runs/draft_model_ultrachat3000_len3_vllm_batched.summary.json`
+- non-vLLM: `runs/draft_model_ultrachat3000_len2_nonvllm.jsonl`
+
+Output divergence from the baseline is diagnostic only for draft-model runs. The benchmark records `matches_baseline`, diverged prompt counts, and token-count mismatches, but speedup is computed from measured wall time and generated-token throughput.
+
+### Draft-Model Commands
+
+Train the current reference checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python methods/draft_model/training/train.py \
+  --target-model-path Qwen/Qwen2.5-7B-Instruct \
+  --data data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl \
+  --eval-data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output checkpoints/draft_model_qwen25_05b_ultrachat3000 \
+  --seq-len 1152 \
+  --epochs 2 \
+  --batch-size 1 \
+  --grad-accum 1 \
+  --lr 5e-5 \
+  --weight-decay 0.0 \
+  --max-grad-norm 0.5 \
+  --eval-interval 1000 \
+  --eval-batch-size 1 \
+  --eval-draft-len 2 \
+  --log-interval 250 \
+  --dtype bf16 \
+  --device cuda \
+  --init-model-path Qwen/Qwen2.5-0.5B-Instruct
+```
+
+Run non-vLLM PyTorch inference:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python methods/draft_model/inference/infer.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --checkpoint-path checkpoints/draft_model_qwen25_05b_ultrachat3000 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/draft_model_ultrachat3000_len2_nonvllm.jsonl \
+  --max-new-tokens 128 \
+  --draft-len 2 \
+  --dtype bf16 \
+  --device cuda
+```
+
+Run vLLM batched throughput inference:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python methods/draft_model/inference/infer_vllm.py \
+  --mode both \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --draft-model-path checkpoints/draft_model_qwen25_05b_ultrachat3000 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/draft_model_ultrachat3000_len2_vllm_batched.summary.json \
+  --baseline-summary-path runs/draft_model_ultrachat3000_len2_vllm_batched.baseline.json \
+  --max-new-tokens 128 \
+  --draft-len 2 \
+  --gpu-memory-utilization 0.85 \
+  --max-model-len 1280 \
+  --max-num-seqs 16 \
+  --warmup-prompts 0
+```
+
+Run vLLM serial latency inference:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python methods/draft_model/inference/infer_vllm.py \
+  --mode both \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --draft-model-path checkpoints/draft_model_qwen25_05b_ultrachat3000 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/draft_model_ultrachat3000_len2_vllm_serial.summary.json \
+  --baseline-summary-path runs/draft_model_ultrachat3000_len2_vllm_serial.baseline.json \
+  --max-new-tokens 128 \
+  --draft-len 2 \
+  --gpu-memory-utilization 0.85 \
+  --max-model-len 1280 \
+  --max-num-seqs 1 \
+  --serial-prompts \
+  --warmup-prompts 1
+```
+
+
 ## Parallel Draft Model (PARD)
+
+Paper: [PARD: Accelerating LLM Inference with Low-Cost PARallel Draft Model Adaptation](https://arxiv.org/abs/2504.18583).
 
 Current reference artifact:
 
@@ -647,10 +453,9 @@ Output divergence from the baseline is diagnostic only for PARD runs. The benchm
 Train the current reference checkpoint:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-. .venv/bin/activate
-python methods/parallel_draft_models/training/train.py \
+CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+uv run python methods/parallel_draft_models/training/train.py \
   --target-model-path Qwen/Qwen2.5-7B-Instruct \
   --draft-base-model-path Qwen/Qwen2.5-0.5B-Instruct \
   --data data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl \
@@ -675,10 +480,9 @@ python methods/parallel_draft_models/training/train.py \
 Run non-vLLM PyTorch inference with the measured best setting:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-. .venv/bin/activate
-python methods/parallel_draft_models/inference/infer.py \
+CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+uv run python methods/parallel_draft_models/inference/infer.py \
   --model-path Qwen/Qwen2.5-7B-Instruct \
   --checkpoint-path checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000 \
   --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
@@ -693,10 +497,9 @@ python methods/parallel_draft_models/inference/infer.py \
 Run vLLM batched throughput inference with the measured best setting. `infer_vllm.py` intentionally fixes `gpu_memory_utilization=0.85` for both baseline and speculative engines.
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-. .venv/bin/activate
-python methods/parallel_draft_models/inference/infer_vllm.py \
+CUDA_VISIBLE_DEVICES=0 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+uv run python methods/parallel_draft_models/inference/infer_vllm.py \
   --mode both \
   --model-path Qwen/Qwen2.5-7B-Instruct \
   --checkpoint-path checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000 \
@@ -714,10 +517,9 @@ python methods/parallel_draft_models/inference/infer_vllm.py \
 Run vLLM serial latency inference:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-. .venv/bin/activate
-python methods/parallel_draft_models/inference/infer_vllm.py \
+CUDA_VISIBLE_DEVICES=0 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+uv run python methods/parallel_draft_models/inference/infer_vllm.py \
   --mode both \
   --model-path Qwen/Qwen2.5-7B-Instruct \
   --checkpoint-path checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000 \
@@ -737,10 +539,9 @@ python methods/parallel_draft_models/inference/infer_vllm.py \
 Run only a speculative vLLM candidate against an existing baseline summary:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-. .venv/bin/activate
-python methods/parallel_draft_models/inference/infer_vllm.py \
+CUDA_VISIBLE_DEVICES=0 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+uv run python methods/parallel_draft_models/inference/infer_vllm.py \
   --mode speculative \
   --model-path Qwen/Qwen2.5-7B-Instruct \
   --checkpoint-path checkpoints/parallel_draft_models_qwen25_05b_ultrachat3000 \
@@ -755,125 +556,272 @@ python methods/parallel_draft_models/inference/infer_vllm.py \
   --seed 0
 ```
 
-## Draft Model
+## Medusa-1
 
-Current reference artifact:
+Paper: [Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads](https://arxiv.org/abs/2401.10774).
 
-- checkpoint: `checkpoints/draft_model_qwen25_05b_ultrachat3000`
+Current reference artifacts:
+
+- local checkpoint: `checkpoints/medusa_1_qwen25_7b_eval100`
 - target model: `Qwen/Qwen2.5-7B-Instruct`
-- draft base: `Qwen/Qwen2.5-0.5B-Instruct`
-- full distillation set: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl`
-- reference eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
+- train/eval set: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
 - eval setup: `100` train-overlap prompts, `max_new_tokens=128`
-- best measured inference draft length: `2`
+- best inference settings: `draft_len=4`, `tree_topk=5`, `max_tree_nodes=31`
 
-The current draft-model checkpoint was trained from scratch on the 3000-row UltraChat/Qwen2.5-7B completion set, not resumed from the 100-row overfit checkpoint. Final teacher-forced eval on the 100-row eval file:
+The Medusa-1 implementation is non-vLLM only. It trains frozen-backbone future-token heads and verifies Medusa tree candidates with a local masked Qwen tree forward. Output divergence from the baseline is diagnostic only for this method; the benchmark records baseline-match fields, but speedup is computed from measured wall time and generated-token throughput.
 
-- eval loss: `0.1941`
-- top-1 match: `95.17%`
-- acceptance proxy: `92.86%`
-- mean accepted tokens per step proxy: `1.8567`
+Latest local non-vLLM benchmark on GPU 4:
 
-Latest draft-model benchmark results on GPU 4. All vLLM rows use `--gpu-memory-utilization 0.85` for both the baseline engine and the speculative engine.
+| Path | Eval prompts | Max new tokens | Baseline throughput | Medusa throughput | Speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| non-vLLM PyTorch loop | `100` | `128` | `63.68 tok/s` | `146.23 tok/s` | `2.2986x` | `40.77%` |
 
-| Path | Baseline wall time | Draft-model wall time | Baseline mean latency | Draft-model mean latency | Baseline throughput | Draft-model throughput | Speedup | Acceptance |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| vLLM batched throughput (`max_num_seqs=16`) | `6.6198s` | `6.9635s` | n/a | n/a | `1830.57 tok/s` | `1740.93 tok/s` | `0.9506x` | `82.09%` |
-| vLLM serial latency (`max_num_seqs=1`) | `74.4407s` | `71.4878s` | `0.7444s` | `0.7149s` | `162.63 tok/s` | `169.65 tok/s` | `1.0413x` | `81.55%` |
-| non-vLLM PyTorch loop | `201.1899s` | `368.4114s` | `2.0119s` | `3.6841s` | `60.21 tok/s` | `32.88 tok/s` | `0.5461x` | `81.79%` |
+Benchmark file:
 
-For vLLM batched throughput, `draft_len=3` was worse on the same baseline: `0.8710x` speedup with `77.09%` acceptance. The non-vLLM PyTorch path reaches high acceptance but remains slower because it pays a separate 0.5B draft-model forward loop in Python.
-
-Benchmark files:
-
-- vLLM batched: `runs/draft_model_ultrachat3000_len2_vllm_batched.summary.json`
-- vLLM serial: `runs/draft_model_ultrachat3000_len2_vllm_serial.summary.json`
-- vLLM batched, `draft_len=3`: `runs/draft_model_ultrachat3000_len3_vllm_batched.summary.json`
-- non-vLLM: `runs/draft_model_ultrachat3000_len2_nonvllm.jsonl`
-
-Output divergence from the baseline is diagnostic only for draft-model runs. The benchmark records `matches_baseline`, diverged prompt counts, and token-count mismatches, but speedup is computed from measured wall time and generated-token throughput.
-
-### Draft-Model Commands
+- non-vLLM: `runs/medusa_1_eval100_len4_top5_nodes31_greedy128.jsonl`, `runs/medusa_1_eval100_len4_top5_nodes31_greedy128.summary.json`
 
 Train the current reference checkpoint:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/draft_model/training/train.py \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/medusa_1/training/train.py \
   --target-model-path Qwen/Qwen2.5-7B-Instruct \
-  --data data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl \
+  --data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
   --eval-data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
-  --output checkpoints/draft_model_qwen25_05b_ultrachat3000 \
+  --output checkpoints/medusa_1_qwen25_7b_eval100 \
   --seq-len 1152 \
-  --epochs 2 \
+  --steps 300 \
   --batch-size 1 \
   --grad-accum 1 \
-  --lr 5e-5 \
-  --weight-decay 0.0 \
-  --max-grad-norm 0.5 \
-  --eval-interval 1000 \
-  --eval-batch-size 1 \
-  --eval-draft-len 2 \
-  --log-interval 250 \
+  --lr 1e-3 \
+  --max-grad-norm 1.0 \
   --dtype bf16 \
   --device cuda \
-  --init-model-path Qwen/Qwen2.5-0.5B-Instruct
+  --limit-samples 100 \
+  --eval-batches 8
 ```
 
 Run non-vLLM PyTorch inference:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/draft_model/inference/infer.py \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/medusa_1/inference/infer.py \
   --model-path Qwen/Qwen2.5-7B-Instruct \
-  --checkpoint-path checkpoints/draft_model_qwen25_05b_ultrachat3000 \
+  --checkpoint-path checkpoints/medusa_1_qwen25_7b_eval100 \
   --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
-  --output runs/draft_model_ultrachat3000_len2_nonvllm.jsonl \
+  --output runs/medusa_1_eval100_len4_top5_nodes31_greedy128.jsonl \
   --max-new-tokens 128 \
-  --draft-len 2 \
+  --draft-len 4 \
+  --tree-topk 5 \
+  --max-tree-nodes 31 \
   --dtype bf16 \
-  --device cuda
+  --device cuda \
+  --warmup-prompts 2
 ```
 
-Run vLLM batched throughput inference:
+## Training-Free Wiki Extract Dataset
+
+Current reference artifacts:
+
+- target model: `Qwen/Qwen2.5-7B-Instruct`
+- eval set: `data/wiki_extract_ngram_eval100_qwen25_7b.jsonl`
+- eval setup: first `50` prompts, `max_new_tokens=128`, `bf16`
+- vLLM setup: baseline and speculative engines both use `--gpu-memory-utilization 0.85`
+
+The Wikipedia corpus is embedded in each request: dataset prep writes the full article into `prompt` and `prompt_ids`, so both methods build draft context from that request's prompt tokens plus accepted generation history. The final runs do not use a shared external corpus index; the non-vLLM suffix script has optional `--global-cache`, but it was not used here.
+
+Prepare the extractive Wikipedia eval set:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/draft_model/inference/infer_vllm.py \
-  --mode both \
+uv run python data/prepare_ngram_wiki.py \
   --model-path Qwen/Qwen2.5-7B-Instruct \
-  --draft-model-path checkpoints/draft_model_qwen25_05b_ultrachat3000 \
-  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
-  --output runs/draft_model_ultrachat3000_len2_vllm_batched.summary.json \
-  --baseline-summary-path runs/draft_model_ultrachat3000_len2_vllm_batched.baseline.json \
-  --max-new-tokens 128 \
-  --draft-len 2 \
-  --gpu-memory-utilization 0.85 \
-  --max-model-len 1280 \
-  --max-num-seqs 16 \
-  --warmup-prompts 0
+  --output data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
+  --num-questions 100 \
+  --prompt-token-budget 14336
 ```
 
-Run vLLM serial latency inference:
+## N-gram Wiki Extract Benchmarks
+
+Reference settings:
+
+- target model: `Qwen/Qwen2.5-7B-Instruct`
+- eval setup: first `50` prompts, `max_new_tokens=128`, `bf16`
+- n-gram settings: `draft_len=5`, prompt lookup `3..8`
+- vLLM setup: baseline and speculative engines both use `--gpu-memory-utilization 0.85`
+
+Output divergence from the baseline is allowed for these rows. The benchmark artifacts still record exact divergence counts and token-count mismatches.
+
+| Path | Baseline wall time | N-gram wall time | Baseline mean latency | N-gram mean latency | Baseline throughput | N-gram throughput | Speedup | Decode speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| non-vLLM PyTorch loop | `120.4061s` | `58.1024s` | `2.4081s` | `1.1620s` | `32.16 tok/s` | `66.64 tok/s` | `2.0723x` | `3.2221x` | `84.37%` |
+| vLLM batched throughput (`max_num_seqs=16`) | `12.0867s` | `10.9570s` | n/a | n/a | `305.54 tok/s` | `336.86 tok/s` | `1.1031x` | `1.1611x` | `47.67%` |
+| vLLM serial latency (`max_num_seqs=1`) | `33.0454s` | `17.5306s` | `0.6609s` | `0.3506s` | `114.54 tok/s` | `213.23 tok/s` | `1.8850x` | `2.9128x` | `83.73%` |
+
+The non-vLLM table row uses aggregate wall-time speedup from per-prompt JSONL records. The emitted summary file also reports mean per-prompt speedup `2.1818x`. For vLLM, the batched row uses `ngram_gpu`; the serial row uses `ngram` because vLLM `0.19.1` fails to initialize `ngram_gpu` at batch size `1`.
+
+Benchmark files:
+
+- non-vLLM: `runs/ngram_wiki50_nonvllm_bf16.jsonl`, `runs/ngram_wiki50_nonvllm_bf16.summary.json`
+- vLLM batched: `runs/ngram_wiki50_vllm_batched.baseline.json`, `runs/ngram_wiki50_vllm_batched.summary.json`
+- vLLM serial: `runs/ngram_wiki50_vllm_serial.baseline.json`, `runs/ngram_wiki50_vllm_serial.summary.json`
+
+### N-gram Commands
+
+Run n-gram non-vLLM PyTorch inference:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4
-. .venv/bin/activate
-python methods/draft_model/inference/infer_vllm.py \
-  --mode both \
+CUDA_VISIBLE_DEVICES=0 uv run python methods/ngram/inference/infer.py \
   --model-path Qwen/Qwen2.5-7B-Instruct \
-  --draft-model-path checkpoints/draft_model_qwen25_05b_ultrachat3000 \
-  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
-  --output runs/draft_model_ultrachat3000_len2_vllm_serial.summary.json \
-  --baseline-summary-path runs/draft_model_ultrachat3000_len2_vllm_serial.baseline.json \
+  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
+  --output runs/ngram_wiki50_nonvllm_bf16.jsonl \
+  --limit-prompts 50 \
   --max-new-tokens 128 \
-  --draft-len 2 \
-  --gpu-memory-utilization 0.85 \
-  --max-model-len 1280 \
-  --max-num-seqs 1 \
-  --serial-prompts \
+  --draft-len 5 \
+  --prompt-lookup-min 3 \
+  --prompt-lookup-max 8 \
+  --max-model-len 16384 \
+  --dtype bf16 \
+  --device cuda \
   --warmup-prompts 1
 ```
+
+Run n-gram vLLM batched throughput inference:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+uv run python methods/ngram/inference/infer_vllm.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
+  --output runs/ngram_wiki50_vllm_batched.summary.json \
+  --baseline-summary-path runs/ngram_wiki50_vllm_batched.baseline.json \
+  --limit-prompts 50 \
+  --max-new-tokens 128 \
+  --draft-len 5 \
+  --prompt-lookup-min 3 \
+  --prompt-lookup-max 8 \
+  --vllm-ngram-method ngram_gpu \
+  --dtype bf16 \
+  --max-model-len 16384 \
+  --max-num-seqs 16 \
+  --warmup-prompts 0 \
+  --seed 0
+```
+
+Run n-gram vLLM serial latency inference:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+uv run python methods/ngram/inference/infer_vllm.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
+  --output runs/ngram_wiki50_vllm_serial.summary.json \
+  --baseline-summary-path runs/ngram_wiki50_vllm_serial.baseline.json \
+  --limit-prompts 50 \
+  --max-new-tokens 128 \
+  --draft-len 5 \
+  --prompt-lookup-min 3 \
+  --prompt-lookup-max 8 \
+  --vllm-ngram-method ngram \
+  --dtype bf16 \
+  --max-model-len 16384 \
+  --max-num-seqs 1 \
+  --serial-prompts \
+  --warmup-prompts 1 \
+  --seed 0
+```
+
+## Suffix-Decoding Wiki Extract Benchmarks
+
+Reference settings:
+
+- target model: `Qwen/Qwen2.5-7B-Instruct`
+- eval setup: first `50` prompts, `max_new_tokens=128`, `bf16`
+- suffix-decoding settings: `draft_len=8`, `max_tree_depth=8`, `max_spec_factor=1.0`, `min_token_prob=0.0`
+- vLLM setup: baseline and speculative engines both use `--gpu-memory-utilization 0.85`
+
+Output divergence from the baseline is allowed for these rows. The benchmark artifacts still record exact divergence counts and token-count mismatches.
+
+| Path | Baseline wall time | Suffix wall time | Baseline mean latency | Suffix mean latency | Baseline throughput | Suffix throughput | Speedup | Decode speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| non-vLLM PyTorch loop | `120.6764s` | `83.0907s` | `2.4135s` | `1.6618s` | `31.90 tok/s` | `46.32 tok/s` | `1.4523x` | `1.8277x` | `59.20%` |
+| vLLM batched throughput (`max_num_seqs=16`) | `11.9448s` | `10.7483s` | n/a | n/a | `309.17 tok/s` | `338.10 tok/s` | `1.1113x` | `1.1030x` | `81.27%` |
+| vLLM serial latency (`max_num_seqs=1`) | `32.8949s` | `17.9576s` | `0.6579s` | `0.3592s` | `115.06 tok/s` | `209.77 tok/s` | `1.8318x` | `2.8594x` | `81.07%` |
+
+The non-vLLM table row uses aggregate wall-time speedup from per-prompt JSONL records. The emitted summary file also reports mean per-prompt speedup `1.4424x`. The vLLM suffix path requires `arctic-inference==0.1.1` in the environment.
+
+Benchmark files:
+
+- non-vLLM: `runs/suffix_wiki50_nonvllm_bf16.jsonl`, `runs/suffix_wiki50_nonvllm_bf16.summary.json`
+- vLLM batched: `runs/suffix_wiki50_vllm_batched.baseline.json`, `runs/suffix_wiki50_vllm_batched.summary.json`
+- vLLM serial: `runs/suffix_wiki50_vllm_serial.baseline.json`, `runs/suffix_wiki50_vllm_serial.summary.json`
+
+### Suffix-Decoding Commands
+
+Run suffix-decoding non-vLLM PyTorch inference:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python methods/suffix_decoding/inference/infer.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
+  --output runs/suffix_wiki50_nonvllm_bf16.jsonl \
+  --limit-prompts 50 \
+  --max-new-tokens 128 \
+  --draft-len 8 \
+  --max-tree-depth 8 \
+  --max-spec-factor 1.0 \
+  --min-token-prob 0.0 \
+  --max-model-len 16384 \
+  --dtype bf16 \
+  --device cuda \
+  --warmup-prompts 1
+```
+
+Run suffix-decoding vLLM batched throughput inference. The vLLM suffix path requires `arctic-inference==0.1.1` in the environment.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+uv run python methods/suffix_decoding/inference/infer_vllm.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
+  --output runs/suffix_wiki50_vllm_batched.summary.json \
+  --baseline-summary-path runs/suffix_wiki50_vllm_batched.baseline.json \
+  --limit-prompts 50 \
+  --max-new-tokens 128 \
+  --draft-len 8 \
+  --max-tree-depth 8 \
+  --max-cached-requests 10000 \
+  --max-spec-factor 1.0 \
+  --min-token-prob 0.0 \
+  --dtype bf16 \
+  --max-model-len 16384 \
+  --max-num-seqs 16 \
+  --warmup-prompts 0 \
+  --seed 0
+```
+
+Run suffix-decoding vLLM serial latency inference:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+uv run python methods/suffix_decoding/inference/infer_vllm.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --prompts data/wiki_extract_ngram_eval100_qwen25_7b.jsonl \
+  --output runs/suffix_wiki50_vllm_serial.summary.json \
+  --baseline-summary-path runs/suffix_wiki50_vllm_serial.baseline.json \
+  --limit-prompts 50 \
+  --max-new-tokens 128 \
+  --draft-len 8 \
+  --max-tree-depth 8 \
+  --max-cached-requests 10000 \
+  --max-spec-factor 1.0 \
+  --min-token-prob 0.0 \
+  --dtype bf16 \
+  --max-model-len 16384 \
+  --max-num-seqs 1 \
+  --serial-prompts \
+  --warmup-prompts 1 \
+  --seed 0
+```
+
