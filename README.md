@@ -27,6 +27,12 @@ The experiments reported here were run on an H100 GPU.
 
 Model checkpoints and vLLM exports are available under the [`checkpoints/` folder](https://drive.google.com/drive/folders/1SV9VgCYe1oEJs6T29nvprDP-ody4SOmd) in Google Drive.
 
+## Data
+
+The learned-proposer methods use an UltraChat distillation set generated from `HuggingFaceH4/ultrachat_200k`: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl` contains 3,000 prompts with greedy `Qwen/Qwen2.5-7B-Instruct` completions, and `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl` is the first 100 records from that same set. The 100-sample train-overlap slice is used to probe best-case acceptance under the compute limits of these experiments, not as a held-out generalization benchmark.
+
+The training-free n-gram and suffix-decoding methods use `data/wiki_extract_ngram_eval100_qwen25_7b.jsonl`, a 100-question extractive Wikipedia set. Each prompt embeds the relevant article text, so the proposer context comes from the request prompt plus accepted generation history rather than from a shared external corpus index.
+
 ## EAGLE-3
 
 Paper: [EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test](https://arxiv.org/abs/2503.01840).
