@@ -1,5 +1,7 @@
 # Speculative Decoding Implementations
 
+![Speculative decoding overview](assets/specdecode_image.png)
+
 This repository implements speculative decoding methods from scratch and benchmarks them behind one shared decoding contract.
 
 Every method plugs into the same target-model interface, greedy verifier, metrics schema, and autoregressive baseline, so speedups and acceptance rates are comparable across proposer designs rather than artifacts of separate evaluation code.
@@ -21,7 +23,7 @@ The project uses `uv` with Python 3.12. From a fresh clone, this creates `.venv`
 uv sync --python 3.12
 ```
 
-Run scripts with `uv run python ...`; the command examples below do not require shell activation.
+The experiments reported here were run on an H100 GPU.
 
 Model checkpoints and vLLM exports are available under the [`checkpoints/` folder](https://drive.google.com/drive/folders/1SV9VgCYe1oEJs6T29nvprDP-ody4SOmd) in Google Drive.
 
