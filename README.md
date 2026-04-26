@@ -1,6 +1,6 @@
 # Speculative Decoding Implementations
 
-![Speculative decoding overview](assets/specdecode_image.png)
+![Speculative decoding overview](assets/specdecode_image_v2.png)
 
 This repository implements speculative decoding methods from scratch and benchmarks them behind one shared decoding contract.
 
