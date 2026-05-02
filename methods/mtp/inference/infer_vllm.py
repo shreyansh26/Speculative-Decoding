@@ -39,7 +39,7 @@ def patch_mimo_mtp_multi_step() -> None:
     """Allow vLLM's Qwen2/MiMo MTP module to use layer 1 for the second step."""
     def requested_mtp_layers() -> int:
         try:
-            return int(os.environ.get("CODEX_MTP_NUM_SPEC_TOKENS", "1"))
+            return int(os.environ.get("MTP_NUM_SPEC_TOKENS", "1"))
         except ValueError:
             return 1
 
@@ -58,10 +58,13 @@ def patch_mimo_mtp_multi_step() -> None:
         from vllm.config.speculative import SpeculativeConfig
     except Exception:
         SpeculativeConfig = None
-    if SpeculativeConfig is not None and not getattr(SpeculativeConfig, "_codex_mtp_override_patched", False):
+    if SpeculativeConfig is not None and not getattr(SpeculativeConfig, "_mtp_override_patched", False):
         original_override = SpeculativeConfig.hf_config_override
 
         def hf_config_override(hf_config):
+            # vLLM rewrites MiMoForCausalLM into MiMoMTPModel for speculative
+            # decoding. Preserve the requested MTP layer count across that
+            # rewrite so two-step checkpoints instantiate both MTP layers.
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             updated = original_override(hf_config)
             if updated.architectures[0] == "MiMoMTPModel" and n_predict is not None:
@@ -74,16 +77,19 @@ def patch_mimo_mtp_multi_step() -> None:
             return updated
 
         SpeculativeConfig.hf_config_override = staticmethod(hf_config_override)
-        SpeculativeConfig._codex_mtp_override_patched = True
+        SpeculativeConfig._mtp_override_patched = True
 
     try:
         from vllm.model_executor.models import mimo_mtp
     except Exception:
         return
-    if not getattr(mimo_mtp.MiMoMultiTokenPredictor, "_codex_mtp_init_patched", False):
+    if not getattr(mimo_mtp.MiMoMultiTokenPredictor, "_mtp_init_patched", False):
         original_init = mimo_mtp.MiMoMultiTokenPredictor.__init__
 
         def init(self, *args, **kwargs):
+            # MiMoMultiTokenPredictor builds its ModuleDict from
+            # num_nextn_predict_layers. Set it before the original constructor
+            # runs so vLLM creates the expected number of draft layers.
             vllm_config = kwargs.get("vllm_config", args[0] if args else None)
             if vllm_config is not None:
                 config = vllm_config.model_config.hf_config
@@ -95,13 +101,17 @@ def patch_mimo_mtp_multi_step() -> None:
             original_init(self, *args, **kwargs)
 
         mimo_mtp.MiMoMultiTokenPredictor.__init__ = init
-        mimo_mtp.MiMoMultiTokenPredictor._codex_mtp_init_patched = True
-    if not getattr(mimo_mtp.MiMoMTP, "_codex_mtp_load_patched", False):
+        mimo_mtp.MiMoMultiTokenPredictor._mtp_init_patched = True
+    if not getattr(mimo_mtp.MiMoMTP, "_mtp_load_patched", False):
         original_load_weights = mimo_mtp.MiMoMTP.load_weights
 
         def load_weights(self, weights):
             def fixed():
                 for name, tensor in weights:
+                    # Our training checkpoint uses a compact local module
+                    # layout. vLLM's MiMo loader expects those tensors under
+                    # model.* before it maps layer indices into its runtime
+                    # ModuleDict.
                     if name == "embed_tokens.weight":
                         name = "model.embed_tokens.weight"
                     elif name.startswith("mtp_layers."):
@@ -111,7 +121,7 @@ def patch_mimo_mtp_multi_step() -> None:
             return original_load_weights(self, fixed())
 
         mimo_mtp.MiMoMTP.load_weights = load_weights
-        mimo_mtp.MiMoMTP._codex_mtp_load_patched = True
+        mimo_mtp.MiMoMTP._mtp_load_patched = True
 
     def forward(
         self,
@@ -122,6 +132,10 @@ def patch_mimo_mtp_multi_step() -> None:
         inputs_embeds=None,
         spec_step_idx: int = 0,
     ):
+        # vLLM's upstream MiMoMTP.forward asserts spec_step_idx == 0. The
+        # underlying MiMoMultiTokenPredictor already accepts spec_step_idx and
+        # routes it to the matching MTP layer, so pass it through for the
+        # two-token benchmark.
         del intermediate_tensors
         return self.model(
             input_ids,
@@ -312,7 +326,7 @@ def main() -> None:
     args = parse_args()
     if args.max_num_seqs is None:
         args.max_num_seqs = 1 if args.serial_prompts else 16
-    os.environ["CODEX_MTP_NUM_SPEC_TOKENS"] = str(args.num_speculative_steps)
+    os.environ["MTP_NUM_SPEC_TOKENS"] = str(args.num_speculative_steps)
     patch_mimo_mtp_multi_step()
     torch.manual_seed(args.seed)
     draft_model_path = args.draft_model_path or args.checkpoint_path
