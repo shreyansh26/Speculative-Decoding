@@ -52,8 +52,8 @@ Training summary:
 
 | Checkpoint | MTP layers | Steps | Last train accuracy | Eval proxy accuracy |
 | --- | ---: | ---: | ---: | ---: |
-| [`checkpoints/mtp_qwen25_7b_eval100_steps1`](https://drive.google.com/drive/folders/190Y-She5MLs7MvQ_vJlJldotdtLlJpGX) | `1` | `1000` | `93.75%` | `96.73%` |
-| [`checkpoints/mtp_qwen25_7b_eval100_steps2`](https://drive.google.com/drive/folders/1AwZlCziHrZsNVU68r8iJUKYkZwLcRXtV) | `2` | `1500` | `98.83%` | `98.32%` |
+| `checkpoints/mtp_qwen25_7b_eval100_steps1` | `1` | `1000` | `93.75%` | `96.73%` |
+| `checkpoints/mtp_qwen25_7b_eval100_steps2` | `2` | `1500` | `98.83%` | `98.32%` |
 
 Latest benchmark results. vLLM rows use `--gpu-memory-utilization 0.85`; output divergence is recorded as diagnostic for vLLM, matching the EAGLE-3 vLLM convention in this repo. Non-vLLM rows use the exact PyTorch reference verifier and match the greedy baseline.
 
