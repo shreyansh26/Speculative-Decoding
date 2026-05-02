@@ -56,7 +56,7 @@ Training summary:
 | `checkpoints/mtp_qwen25_7b_eval100_steps1` | `1` | `1000` | `93.75%` | `96.73%` |
 | `checkpoints/mtp_qwen25_7b_eval100_steps2` | `2` | `1500` | `98.83%` | `98.32%` |
 
-Latest vLLM benchmark results. All rows use `--gpu-memory-utilization 0.85`; output divergence is recorded as diagnostic, matching the EAGLE-3 vLLM convention in this repo.
+Latest benchmark results. vLLM rows use `--gpu-memory-utilization 0.85`; output divergence is recorded as diagnostic for vLLM, matching the EAGLE-3 vLLM convention in this repo. Non-vLLM rows use the exact PyTorch reference verifier and match the greedy baseline.
 
 | Path | Draft tokens | Baseline wall time | MTP wall time | Baseline throughput | MTP throughput | Speedup | Acceptance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -64,8 +64,10 @@ Latest vLLM benchmark results. All rows use `--gpu-memory-utilization 0.85`; out
 | vLLM serial latency (`max_num_seqs=1`) | `2` | `74.2832s` | `53.6416s` | `162.97 tok/s` | `226.06 tok/s` | `1.3848x` | `42.41%` total, `63.25% / 21.56%` by position |
 | vLLM batched throughput (`max_num_seqs=16`) | `1` | `6.7138s` | `6.9879s` | `1805.08 tok/s` | `1735.29 tok/s` | `0.9608x` | `61.97%` |
 | vLLM batched throughput (`max_num_seqs=16`) | `2` | `6.7155s` | `7.0070s` | `1804.64 tok/s` | `1731.14 tok/s` | `0.9584x` | `42.68%` total, `63.52% / 21.85%` by position |
+| non-vLLM PyTorch loop | `1` | n/a | n/a | `64.53 tok/s` | `57.49 tok/s` | `0.8909x` | `76.21%` |
+| non-vLLM PyTorch loop | `2` | n/a | n/a | `65.09 tok/s` | `52.40 tok/s` | `0.8050x` | `72.77%` |
 
-The non-vLLM implementation is an exact reference path that maintains MTP KV caches and updates them sequentially with the verified target prefix. A 100-prompt, 16-token smoke check for the 1-token checkpoint matched the greedy baseline with `94.79%` acceptance, but this Python reference path is slower than the baseline (`0.8821x`) because it prioritizes exact cache-state validation over vLLM-style fused scheduling.
+The non-vLLM implementation is an exact reference path that maintains MTP KV caches and updates them sequentially with the verified target prefix. It is slower than the baseline at 128 generated tokens because it prioritizes exact cache-state validation over vLLM-style fused scheduling.
 
 ### MTP Commands
 
@@ -122,6 +124,36 @@ CUDA_VISIBLE_DEVICES=7 uv run python methods/mtp/inference/infer_vllm.py \
 ```
 
 Run vLLM batched throughput inference by using the same command without `--serial-prompts`, with `--max-num-seqs 16`, and with a batched output/baseline summary path.
+
+Run non-vLLM PyTorch inference for the 1-token checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 uv run python methods/mtp/inference/infer.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --checkpoint-path checkpoints/mtp_qwen25_7b_eval100_steps1 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/mtp_eval100_steps1_nonvllm.jsonl \
+  --max-new-tokens 128 \
+  --num-speculative-steps 1 \
+  --dtype bf16 \
+  --device cuda \
+  --warmup-prompts 1
+```
+
+Run non-vLLM PyTorch inference for the 2-token checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 uv run python methods/mtp/inference/infer.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --checkpoint-path checkpoints/mtp_qwen25_7b_eval100_steps2 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/mtp_eval100_steps2_nonvllm.jsonl \
+  --max-new-tokens 128 \
+  --num-speculative-steps 2 \
+  --dtype bf16 \
+  --device cuda \
+  --warmup-prompts 1
+```
 
 ## EAGLE-3
 
