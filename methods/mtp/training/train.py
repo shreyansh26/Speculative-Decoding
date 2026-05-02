@@ -4,6 +4,8 @@ Train a DeepSeek-V3-style multi-token prediction (MTP) head.
 The target model is frozen.  Each MTP layer receives the previous hidden state
 and the embedding of the next accepted token, then predicts one additional
 future token.  Checkpoints are saved in vLLM's Qwen2/MiMo MTP layout.
+
+This is DeepSeek-style MTP exported through vLLM's Qwen2/MiMo compatibility path.
 """
 
 import argparse
