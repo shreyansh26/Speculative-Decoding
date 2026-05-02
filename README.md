@@ -40,9 +40,8 @@ Paper reference: [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437
 
 Current reference artifacts:
 
-- 1 additional draft token: `checkpoints/mtp_qwen25_7b_eval100_steps1`
-- 2 additional draft tokens: `checkpoints/mtp_qwen25_7b_eval100_steps2`
-- vLLM export for each checkpoint: `<checkpoint>/vllm_export`
+- 1 additional draft token: [`checkpoints/mtp_qwen25_7b_eval100_steps1`](https://drive.google.com/drive/folders/190Y-She5MLs7MvQ_vJlJldotdtLlJpGX) ([vLLM export](https://drive.google.com/drive/folders/1oE4YUAatHsyj20WlwAHarau0nCENp0Ph))
+- 2 additional draft tokens: [`checkpoints/mtp_qwen25_7b_eval100_steps2`](https://drive.google.com/drive/folders/1AwZlCziHrZsNVU68r8iJUKYkZwLcRXtV) ([vLLM export](https://drive.google.com/drive/folders/1vT-MF80ywranZNkG4F6YGtsoRfKrdFcf))
 - target model: `Qwen/Qwen2.5-7B-Instruct`
 - train/eval data: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
 - eval setup: `100` train-overlap UltraChat prompts, `max_new_tokens=128`
@@ -53,8 +52,8 @@ Training summary:
 
 | Checkpoint | MTP layers | Steps | Last train accuracy | Eval proxy accuracy |
 | --- | ---: | ---: | ---: | ---: |
-| `checkpoints/mtp_qwen25_7b_eval100_steps1` | `1` | `1000` | `93.75%` | `96.73%` |
-| `checkpoints/mtp_qwen25_7b_eval100_steps2` | `2` | `1500` | `98.83%` | `98.32%` |
+| [`checkpoints/mtp_qwen25_7b_eval100_steps1`](https://drive.google.com/drive/folders/190Y-She5MLs7MvQ_vJlJldotdtLlJpGX) | `1` | `1000` | `93.75%` | `96.73%` |
+| [`checkpoints/mtp_qwen25_7b_eval100_steps2`](https://drive.google.com/drive/folders/1AwZlCziHrZsNVU68r8iJUKYkZwLcRXtV) | `2` | `1500` | `98.83%` | `98.32%` |
 
 Latest benchmark results. vLLM rows use `--gpu-memory-utilization 0.85`; output divergence is recorded as diagnostic for vLLM, matching the EAGLE-3 vLLM convention in this repo. Non-vLLM rows use the exact PyTorch reference verifier and match the greedy baseline.
 
