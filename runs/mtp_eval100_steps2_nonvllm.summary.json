@@ -1,0 +1,12 @@
+{
+  "num_records": 100.0,
+  "mean_speedup": 0.8049665952731526,
+  "mean_acceptance_rate": 0.7277047276787019,
+  "mean_method_tokens_per_s": 52.3975769450816,
+  "mean_baseline_tokens_per_s": 65.09340367770893,
+  "method": "mtp",
+  "num_prompts": 100,
+  "num_speculative_steps": 2,
+  "matches_baseline": true,
+  "diverged_prompts": 0
+}

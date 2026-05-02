@@ -1,0 +1,27 @@
+{
+  "method": "mtp_vllm_batched",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "draft_model_path": "checkpoints/mtp_qwen25_7b_eval100_steps1/vllm_export",
+  "num_prompts": 100,
+  "num_speculative_steps": 1,
+  "generated_tokens": 12126,
+  "baseline_wall_time_s": 6.71381453901995,
+  "method_wall_time_s": 6.987870680051856,
+  "baseline_tokens_per_s": 1805.0841186579862,
+  "method_tokens_per_s": 1735.2925598087936,
+  "speedup": 0.9607811658830137,
+  "throughput_speedup": 0.9613361182851246,
+  "matches_baseline": false,
+  "diverged_prompts": 54,
+  "gpu_memory_utilization": 0.85,
+  "max_num_seqs": 16,
+  "serial_prompts": false,
+  "speculation_steps": 7442,
+  "proposed_draft_tokens": 7442,
+  "accepted_draft_tokens": 4612,
+  "acceptance_rate": 0.6197258801397474,
+  "mean_accepted_tokens_per_step": 0.6197258801397474,
+  "acceptance_rate_by_position": [
+    0.6197258801397474
+  ]
+}

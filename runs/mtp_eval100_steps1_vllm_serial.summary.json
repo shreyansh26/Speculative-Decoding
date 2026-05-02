@@ -1,0 +1,30 @@
+{
+  "method": "mtp_vllm_serial",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "draft_model_path": "checkpoints/mtp_qwen25_7b_eval100_steps1/vllm_export",
+  "num_prompts": 100,
+  "num_speculative_steps": 1,
+  "generated_tokens": 12126,
+  "baseline_wall_time_s": 74.38983387034386,
+  "method_wall_time_s": 55.05973083735444,
+  "baseline_tokens_per_s": 162.73729043540934,
+  "method_tokens_per_s": 220.23355028414522,
+  "speedup": 1.3510751458282686,
+  "throughput_speedup": 1.3533072210733177,
+  "matches_baseline": false,
+  "diverged_prompts": 52,
+  "gpu_memory_utilization": 0.85,
+  "max_num_seqs": 1,
+  "serial_prompts": true,
+  "speculation_steps": 7663,
+  "proposed_draft_tokens": 7663,
+  "accepted_draft_tokens": 4512,
+  "acceptance_rate": 0.5888033407281743,
+  "mean_accepted_tokens_per_step": 0.5888033407281743,
+  "acceptance_rate_by_position": [
+    0.5888033407281743
+  ],
+  "method_latency_mean_s": 0.5505973083735444,
+  "method_latency_p50_s": 0.5524693209445104,
+  "method_latency_p95_s": 0.7221488140057772
+}
