@@ -11,6 +11,7 @@ Every method plugs into the same target-model interface, greedy verifier, metric
 | Method | Directory | Summary | Runtime support |
 | --- | --- | --- | --- |
 | EAGLE-3 | `methods/eagle3` | Low/mid/high hidden-state fusion with a lightweight autoregressive drafter, plus a ModelOpt comparison workflow. | non-vLLM and vLLM |
+| MTP | `methods/mtp` | DeepSeek-V3-style multi-token prediction modules attached to the frozen target hidden state and exported in vLLM's Qwen2/MiMo MTP layout. | non-vLLM and vLLM |
 | Draft model | `methods/draft_model` | Small Qwen-style draft LM trained from Qwen2.5-7B greedy completions, then used with standard speculative verification. | non-vLLM and vLLM |
 | PARD / parallel draft models | `methods/parallel_draft_models` | Parallel future-token heads that predict multiple draft positions in one target-state pass, with non-vLLM and vLLM benchmark paths. | non-vLLM and vLLM |
 | Medusa-1 | `methods/medusa_1` | Frozen-backbone future-token heads trained on target completions; non-vLLM inference verifies top-k Medusa tree candidates with a masked Qwen tree forward. | non-vLLM |
@@ -32,6 +33,95 @@ Model checkpoints and vLLM exports are available under the [`checkpoints/` folde
 The learned-proposer methods use an UltraChat distillation set generated from `HuggingFaceH4/ultrachat_200k`: `data/ultrachat_3000_trunc1024_qwen25_7b_greedy128_ids.jsonl` contains 3,000 prompts with greedy `Qwen/Qwen2.5-7B-Instruct` completions, and `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl` is the first 100 records from that same set. The 100-sample train-overlap slice is used to probe best-case acceptance under the compute limits of these experiments, not as a held-out generalization benchmark.
 
 The training-free n-gram and suffix-decoding methods use `data/wiki_extract_ngram_eval100_qwen25_7b.jsonl`, a 100-question extractive Wikipedia set. Each prompt embeds the relevant article text, so the proposer context comes from the request prompt plus accepted generation history rather than from a shared external corpus index.
+
+## MTP
+
+Paper reference: [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437), using its Multi-Token Prediction design.
+
+Current reference artifacts:
+
+- 1 additional draft token: `checkpoints/mtp_qwen25_7b_eval100_steps1`
+- 2 additional draft tokens: `checkpoints/mtp_qwen25_7b_eval100_steps2`
+- vLLM export for each checkpoint: `<checkpoint>/vllm_export`
+- target model: `Qwen/Qwen2.5-7B-Instruct`
+- train/eval data: `data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl`
+- eval setup: `100` train-overlap UltraChat prompts, `max_new_tokens=128`
+
+Architecture: each MTP layer receives the previous hidden state and the embedding of the next accepted token, applies separate RMSNorms, projects the concatenation back to hidden size, runs one Qwen decoder block, then predicts through the shared target lm head. The vLLM export uses `qwen2` config parsing with the `MiMoForCausalLM` marker so vLLM rewrites it to its `MiMoMTPModel` path.
+
+Training summary:
+
+| Checkpoint | MTP layers | Steps | Last train accuracy | Eval proxy accuracy |
+| --- | ---: | ---: | ---: | ---: |
+| `checkpoints/mtp_qwen25_7b_eval100_steps1` | `1` | `1000` | `93.75%` | `96.73%` |
+| `checkpoints/mtp_qwen25_7b_eval100_steps2` | `2` | `1500` | `98.83%` | `98.32%` |
+
+Latest vLLM benchmark results. All rows use `--gpu-memory-utilization 0.85`; output divergence is recorded as diagnostic, matching the EAGLE-3 vLLM convention in this repo.
+
+| Path | Draft tokens | Baseline wall time | MTP wall time | Baseline throughput | MTP throughput | Speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| vLLM serial latency (`max_num_seqs=1`) | `1` | `74.3898s` | `55.0597s` | `162.74 tok/s` | `220.23 tok/s` | `1.3511x` | `58.88%` |
+| vLLM serial latency (`max_num_seqs=1`) | `2` | `74.2832s` | `53.6416s` | `162.97 tok/s` | `226.06 tok/s` | `1.3848x` | `42.41%` total, `63.25% / 21.56%` by position |
+| vLLM batched throughput (`max_num_seqs=16`) | `1` | `6.7138s` | `6.9879s` | `1805.08 tok/s` | `1735.29 tok/s` | `0.9608x` | `61.97%` |
+| vLLM batched throughput (`max_num_seqs=16`) | `2` | `6.7155s` | `7.0070s` | `1804.64 tok/s` | `1731.14 tok/s` | `0.9584x` | `42.68%` total, `63.52% / 21.85%` by position |
+
+The non-vLLM implementation is an exact reference path that maintains MTP KV caches and updates them sequentially with the verified target prefix. A 100-prompt, 16-token smoke check for the 1-token checkpoint matched the greedy baseline with `94.79%` acceptance, but this Python reference path is slower than the baseline (`0.8821x`) because it prioritizes exact cache-state validation over vLLM-style fused scheduling.
+
+### MTP Commands
+
+Train the 1-token MTP checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 uv run python methods/mtp/training/train.py \
+  --target-model-path Qwen/Qwen2.5-7B-Instruct \
+  --data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --eval-data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output checkpoints/mtp_qwen25_7b_eval100_steps1 \
+  --num-speculative-steps 1 \
+  --steps 1000 \
+  --batch-size 1 \
+  --seq-len 1152 \
+  --lr 1e-4 \
+  --dtype bf16 \
+  --device cuda
+```
+
+Train the 2-token MTP checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 uv run python methods/mtp/training/train.py \
+  --target-model-path Qwen/Qwen2.5-7B-Instruct \
+  --data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --eval-data data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output checkpoints/mtp_qwen25_7b_eval100_steps2 \
+  --num-speculative-steps 2 \
+  --steps 1500 \
+  --batch-size 1 \
+  --seq-len 1152 \
+  --lr 1e-4 \
+  --dtype bf16 \
+  --device cuda
+```
+
+Run vLLM serial latency inference:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 uv run python methods/mtp/inference/infer_vllm.py \
+  --model-path Qwen/Qwen2.5-7B-Instruct \
+  --checkpoint-path checkpoints/mtp_qwen25_7b_eval100_steps2 \
+  --prompts data/ultrachat_3000_train_eval100_qwen25_7b_greedy128_ids.jsonl \
+  --output runs/mtp_eval100_steps2_vllm_serial.summary.json \
+  --baseline-summary-path runs/mtp_eval100_steps2_vllm_serial.baseline.json \
+  --max-new-tokens 128 \
+  --num-speculative-steps 2 \
+  --gpu-memory-utilization 0.85 \
+  --max-model-len 1280 \
+  --max-num-seqs 1 \
+  --serial-prompts \
+  --warmup-prompts 1
+```
+
+Run vLLM batched throughput inference by using the same command without `--serial-prompts`, with `--max-num-seqs 16`, and with a batched output/baseline summary path.
 
 ## EAGLE-3
 
